@@ -15,14 +15,10 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
 
   try {
     await prisma.$transaction(async (tx) => {
-      // 1. Calcular el total REAL en el servidor (No confiamos en el frontend)
       let totalReal = 0
-      
-      // Preparamos los items para guardar
       const saleItemsData = []
 
       for (const item of cart) {
-        // Buscamos el producto en la DB para tener el precio y stock ACTUAL
         const variant = await tx.productVariant.findUnique({
           where: { id: item.variantId },
           include: { product: true }
@@ -30,35 +26,30 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
 
         if (!variant) throw new Error(`Producto ${item.variantId} no encontrado`)
         
-        // Validación de Stock Crítica
         if (variant.stock < item.quantity) {
           throw new Error(`Stock insuficiente para ${variant.product.name}`)
         }
 
-        // Sumamos al total (usando el precio de la DB)
         const subtotal = Number(variant.salePrice) * item.quantity
         totalReal += subtotal
 
-        // Preparamos el item de venta (Snapshot de precios)
         saleItemsData.push({
           variantId: variant.id,
-          description: variant.product.name, // Guardamos el nombre por si después cambia
+          description: variant.product.name,
           quantity: item.quantity,
-          costAtSale: variant.costPrice,     // Guardamos el costo histórico
-          priceAtSale: variant.salePrice     // Guardamos el precio histórico
+          costAtSale: variant.costPrice,
+          priceAtSale: variant.salePrice
         })
 
-        // 2. Descontar Stock
         await tx.productVariant.update({
           where: { id: variant.id },
           data: { stock: { decrement: item.quantity } }
         })
 
-        // 3. Auditoría de Movimiento
         await tx.stockMovement.create({
           data: {
             variantId: variant.id,
-            quantity: -item.quantity, // Negativo porque sale
+            quantity: -item.quantity,
             type: "SALE",
             reason: "Venta Mostrador",
             userId: "sistema"
@@ -66,11 +57,10 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
         })
       }
 
-      // 4. Crear la Venta Cabecera
       await tx.sale.create({
         data: {
           total: totalReal,
-          paymentMethod: "CASH", // Por ahora fijo efectivo
+          paymentMethod: "CASH",
           status: "COMPLETED",
           items: {
             create: saleItemsData
@@ -89,18 +79,32 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
   }
 }
 
-// --- AGREGAR ESTO AL FINAL DE: src/actions/sale-actions.ts ---
-
 export async function cancelSale(saleId: string) {
+  console.log(`🔍 [DEBUG] Iniciando anulación para Venta ID: ${saleId}`)
+  
   try {
     await prisma.$transaction(async (tx) => {
-      // 1. Buscar la venta y sus items
+      // 1. Buscar la venta
       const sale = await tx.sale.findUnique({
         where: { id: saleId },
-        include: { items: true }
+        include: { 
+          items: {
+            include: {
+              variant: {
+                include: { product: true }
+              }
+            }
+          } 
+        }
       })
 
-      if (!sale) throw new Error("Venta no encontrada")
+      if (!sale) {
+        console.error("❌ [DEBUG] Venta no encontrada en DB")
+        throw new Error("Venta no encontrada")
+      }
+      
+      console.log(`📄 [DEBUG] Estado actual de la venta: ${sale.status}`)
+      
       if (sale.status === 'CANCELLED') throw new Error("Ya está anulada")
 
       // 2. Marcar como ANULADA
@@ -109,34 +113,59 @@ export async function cancelSale(saleId: string) {
         data: { status: 'CANCELLED' }
       })
 
-      // 3. Devolver el stock de cada producto
+      // 3. Procesar items
       for (const item of sale.items) {
-        if (item.variantId) {
+        console.log(`📦 [DEBUG] Procesando Item: ${item.description} | isSettled: ${item.isSettled}`)
+
+        if (item.variantId && item.variant) {
           // Devolver stock
           await tx.productVariant.update({
             where: { id: item.variantId },
             data: { stock: { increment: item.quantity } }
           })
 
-          // Auditar el movimiento
+          // Auditar movimiento
           await tx.stockMovement.create({
             data: {
               variantId: item.variantId,
-              quantity: item.quantity, // Positivo (Entra de nuevo)
+              quantity: item.quantity,
               type: 'SALE_CANCELLED',
               reason: `Anulación Venta #${sale.id.slice(0, 8)}`,
               userId: 'sistema'
             }
           })
+
+          // CRÍTICO: ¿Está pagado?
+          if (item.isSettled) {
+            console.log("💰 [DEBUG] -> El item ESTÁ LIQUIDADO. Creando BalanceAdjustment...")
+            
+            const amountOwedBack = Number(item.costAtSale) * item.quantity
+            const ownerId = item.variant.product.ownerId
+
+            const adjustment = await tx.balanceAdjustment.create({
+              data: {
+                ownerId: ownerId,
+                amount: -amountOwedBack, 
+                description: `Devolución producto liquidado: ${item.description} (Venta anulada)`,
+                isApplied: false
+              }
+            })
+            console.log(`✅ [DEBUG] Ajuste creado. ID: ${adjustment.id}, Monto: ${adjustment.amount}`)
+
+          } else {
+            console.log("ℹ️ [DEBUG] -> El item NO está liquidado. No se genera deuda al dueño.")
+          }
         }
       }
     })
 
     revalidatePath("/sales")
-    revalidatePath("/products") // Para que se vea el stock actualizado
+    revalidatePath("/products") 
+    revalidatePath("/owners/balance")
     return { success: true }
 
   } catch (error: any) {
-    return { error: error.message }
+    console.error("❌ [DEBUG] Error fatal anulando venta:", error)
+    return { error: error.message || "Error al anular venta" }
   }
 }

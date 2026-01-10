@@ -1,23 +1,15 @@
 // src/app/sales/page.tsx
 import { prisma } from "@/lib/prisma"
-import { cancelSale } from "@/actions/sale-actions"
-import { revalidatePath } from "next/cache"
+import CancelSaleButton from "@/components/CancelSaleButton" // 👈 Importamos el nuevo componente
 
 export default async function SalesHistoryPage() {
-  // Buscamos las ventas, incluyendo los items para mostrar detalles
+  // Buscamos las ventas
   const sales = await prisma.sale.findMany({
     include: {
       items: true
     },
-    orderBy: { createdAt: 'desc' } // Las más nuevas primero
+    orderBy: { createdAt: 'desc' }
   })
-
-  // Esta función actúa como puente entre el botón y la Server Action
-  async function handleCancel(formData: FormData) {
-    'use server'
-    const saleId = formData.get("saleId") as string
-    await cancelSale(saleId)
-  }
 
   return (
     <div className="p-8 max-w-5xl mx-auto">
@@ -66,15 +58,8 @@ export default async function SalesHistoryPage() {
 
                 <td className="p-4">
                   {sale.status === 'COMPLETED' && (
-                    <form action={handleCancel}>
-                      <input type="hidden" name="saleId" value={sale.id} />
-                      <button 
-                        type="submit"
-                        className="text-red-600 hover:text-red-800 text-sm font-semibold border border-red-200 px-3 py-1 rounded hover:bg-red-50"
-                      >
-                        Anular
-                      </button>
-                    </form>
+                    /* 👇 Usamos el componente interactivo aquí */
+                    <CancelSaleButton saleId={sale.id} />
                   )}
                 </td>
               </tr>

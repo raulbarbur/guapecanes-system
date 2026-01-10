@@ -1,0 +1,188 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- ENUMS ---
+enum Role {
+  ADMIN
+  STAFF
+}
+
+enum StockMovementType {
+  ENTRY           // Ingreso (Remito)
+  SALE            // Venta (Baja automática)
+  ADJUSTMENT      // Ajuste manual (+/- por error/rotura)
+  OWNER_WITHDRAWAL // Retiro del dueño (Baja sin deuda)
+  RETURN          // Devolución de cliente (Alta de stock)
+  SALE_CANCELLED  // Restauración por anulación (Alta)
+}
+
+enum ApptStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED     // Ya realizado
+  BILLED        // Ya cobrado (convertido a venta)
+  CANCELLED
+}
+
+// --- USUARIOS ---
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String   // Hashed
+  name      String
+  role      Role     @default(STAFF)
+  createdAt DateTime @default(now())
+}
+
+// --- CATÁLOGO ---
+model Owner {
+  id                 String    @id @default(uuid())
+  name               String
+  phone              String?
+  email              String?
+  isActive           Boolean   @default(true) 
+  createdAt          DateTime  @default(now())
+  products           Product[]
+  settlements        Settlement[]
+  balanceAdjustments BalanceAdjustment[] 
+}
+
+model Category {
+  id       String    @id @default(uuid())
+  name     String    @unique 
+  products Product[]
+}
+
+model Product {
+  id          String    @id @default(uuid())
+  name        String
+  description String?
+  tags        String[]  // Indexar GIN
+  ownerId     String
+  owner       Owner     @relation(fields: [ownerId], references: [id])
+  categoryId  String
+  category    Category  @relation(fields: [categoryId], references: [id])
+  variants    ProductVariant[]
+  isActive    Boolean   @default(true)
+}
+
+model ProductVariant {
+  id        String   @id @default(uuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+  name      String   // "S - Rojo"
+  imageUrl  String?  // URL de Cloudinary
+  
+  // PRECIOS FLOTANTES (Valor actual de mercado)
+  costPrice Decimal  @db.Decimal(10, 2) 
+  salePrice Decimal  @db.Decimal(10, 2)
+  stock     Int      @default(0)
+  
+  stockMovements StockMovement[]
+  saleItems      SaleItem[]
+
+  @@unique([productId, name]) 
+}
+
+// --- INVENTARIO ---
+model StockMovement {
+  id          String            @id @default(uuid())
+  variantId   String
+  variant     ProductVariant    @relation(fields: [variantId], references: [id])
+  quantity    Int               // +/- 
+  type        StockMovementType
+  reason      String?
+  userId      String            // Auditoría
+  createdAt   DateTime          @default(now())
+}
+
+// --- VENTAS ---
+model Sale {
+  id            String        @id @default(uuid())
+  total         Decimal       @db.Decimal(10, 2)
+  paymentMethod String        // CASH, TRANSFER, MIXED
+  status        String        @default("COMPLETED") // COMPLETED, CANCELLED
+  createdAt     DateTime      @default(now())
+  items         SaleItem[]
+}
+
+model SaleItem {
+  id            String         @id @default(uuid())
+  saleId        String
+  sale          Sale           @relation(fields: [saleId], references: [id])
+  variantId     String?        // Null si es servicio
+  variant       ProductVariant? @relation(fields: [variantId], references: [id])
+  description   String         // Nombre del producto o servicio al momento de venta
+  quantity      Int
+  
+  // SNAPSHOT (Valor congelado al vender)
+  costAtSale    Decimal        @db.Decimal(10, 2)
+  priceAtSale   Decimal        @db.Decimal(10, 2)
+  
+  // ESTADO FINANCIERO
+  isSettled     Boolean        @default(false) 
+  settlementId  String?
+  settlement    Settlement?    @relation(fields: [settlementId], references: [id])
+}
+
+// --- FINANZAS (RENDICIONES) ---
+model Settlement {
+  id          String   @id @default(uuid())
+  ownerId     String
+  owner       Owner    @relation(fields: [ownerId], references: [id])
+  totalAmount Decimal  @db.Decimal(10, 2) // Total pagado
+  createdAt   DateTime @default(now())
+  items       SaleItem[]
+  adjustments BalanceAdjustment[]
+}
+
+model BalanceAdjustment {
+  id           String      @id @default(uuid())
+  ownerId      String
+  owner        Owner       @relation(fields: [ownerId], references: [id])
+  amount       Decimal     @db.Decimal(10, 2) // Negativo = Crédito a favor Local
+  description  String      // "Devolución Venta #123"
+  isApplied    Boolean     @default(false)
+  settlementId String?
+  settlement   Settlement? @relation(fields: [settlementId], references: [id])
+  createdAt    DateTime    @default(now())
+}
+
+// --- SERVICIOS ---
+model Pet {
+  id          String   @id @default(uuid())
+  name        String
+  ownerName   String
+  ownerPhone  String?
+  breed       String?
+  notes       String?  // Notas generales
+  appointments Appointment[]
+  groomingNotes GroomingNote[]
+}
+
+model Appointment {
+  id        String     @id @default(uuid())
+  petId     String
+  pet       Pet        @relation(fields: [petId], references: [id])
+  startTime DateTime
+  endTime   DateTime
+  status    ApptStatus @default(PENDING)
+  price     Decimal?   @db.Decimal(10, 2)
+}
+
+model GroomingNote {
+  id        String   @id @default(uuid())
+  petId     String
+  pet       Pet      @relation(fields: [petId], references: [id])
+  content   String   @db.Text
+  appointmentId String? // Vínculo opcional
+  createdAt DateTime @default(now())
+}
