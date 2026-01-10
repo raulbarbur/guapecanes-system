@@ -1,61 +1,52 @@
 // src/app/dashboard/page.tsx
 import { prisma } from "@/lib/prisma"
 import Link from "next/link"
-import { getLocalDateISO } from "@/lib/utils" // 👈 Importamos
+import { getLocalDateISO } from "@/lib/utils"
 
 export default async function DashboardPage() {
   const now = new Date()
   
+  // Rango Mes (Estándar)
   const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
   const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1)
 
-  // 👇 CAMBIO CLAVE: Usamos la fecha local segura
+  // Rango Hoy (Ajustado a Argentina)
   const todayStr = getLocalDateISO() 
+  // Al agregar T00:00:00, forzamos al servidor a tratarlo como el inicio del día local
   const startOfToday = new Date(`${todayStr}T00:00:00`)
   const endOfToday = new Date(`${todayStr}T23:59:59`)
 
-  // ... (El resto del código sigue IGUAL) ...
-  
   const [monthSales, todaySales, todayAppointments, lowStockVariants] = await Promise.all([
-      // ... tus consultas prisma ...
-      prisma.sale.findMany({
-        where: {
-            status: "COMPLETED",
-            createdAt: { gte: firstDayOfMonth, lt: nextMonth }
-        },
-        include: { items: true }
-      }),
-      prisma.sale.findMany({
-        where: {
-            status: "COMPLETED",
-            createdAt: { gte: startOfToday, lte: endOfToday }
-        }
-      }),
-      prisma.appointment.findMany({
-        where: {
-            startTime: { gte: startOfToday, lte: endOfToday },
-            status: { not: 'CANCELLED' }
-        },
-        include: { pet: true },
-        orderBy: { startTime: 'asc' }
-      }),
-      prisma.productVariant.findMany({
-        where: { stock: { lte: 3 } },
-        include: { product: true },
-        orderBy: { stock: 'asc' },
-        take: 5
-      })
+    prisma.sale.findMany({
+      where: {
+        status: "COMPLETED",
+        createdAt: { gte: firstDayOfMonth, lt: nextMonth }
+      },
+      include: { items: true }
+    }),
+    prisma.sale.findMany({
+      where: {
+        status: "COMPLETED",
+        createdAt: { gte: startOfToday, lte: endOfToday }
+      }
+    }),
+    prisma.appointment.findMany({
+      where: {
+        startTime: { gte: startOfToday, lte: endOfToday },
+        status: { not: 'CANCELLED' }
+      },
+      include: { pet: true },
+      orderBy: { startTime: 'asc' }
+    }),
+    prisma.productVariant.findMany({
+      where: { stock: { lte: 3 } },
+      include: { product: true },
+      orderBy: { stock: 'asc' },
+      take: 5
+    })
   ])
 
-  // ... (Resto de cálculos y renderizado igual) ...
-  
-  // (Copiá el resto del archivo anterior o avisame si necesitás que lo pegue todo de nuevo)
-  // Lo importante es que uses `todayStr` generado por `getLocalDateISO()`
-  
-  // Para simplificar, te paso solo el bloque de return, asumiendo que mantenés los cálculos:
-  // ...
-  
-  // Calculos métricas (igual que antes)
+  // Cálculos
   let monthRevenue = 0
   let monthCost = 0
   monthSales.forEach(sale => {
@@ -70,13 +61,12 @@ export default async function DashboardPage() {
   return (
     <div className="p-8 max-w-7xl mx-auto">
       <h1 className="text-3xl font-bold text-gray-800 mb-2">Tablero de Control</h1>
-      <p className="text-gray-500 mb-8">
-        {/* Mostramos la fecha formateada localmente */}
-        Visión general del negocio hoy, {new Date(todayStr).toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' })}.
+      
+      {/* 👇 AQUÍ ESTABA EL ERROR VISUAL: Ahora usamos startOfToday que es inequívocamente hoy */}
+      <p className="text-gray-500 mb-8 capitalize">
+        Visión general del negocio hoy, {startOfToday.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' })}.
       </p>
-      
-      {/* ... Resto del JSX idéntico al anterior ... */}
-      
+
       {/* SECCIÓN 1: CAJA DEL DÍA */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
         <div className="bg-gradient-to-br from-green-600 to-green-700 text-white p-6 rounded-lg shadow-lg transform hover:scale-105 transition">
@@ -99,6 +89,7 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* AGENDA HOY */}
         <div className="bg-white rounded-lg shadow border overflow-hidden">
             <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
                 <h2 className="font-bold text-lg text-gray-800">📅 Agenda de Hoy</h2>
@@ -109,7 +100,6 @@ export default async function DashboardPage() {
             ) : (
                 <div className="divide-y">
                     {todayAppointments.map(appt => {
-                        // Ajustamos visualización de hora
                         const time = appt.startTime.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' })
                         return (
                             <div key={appt.id} className="p-4 flex items-center justify-between hover:bg-gray-50">
@@ -132,6 +122,7 @@ export default async function DashboardPage() {
             )}
         </div>
 
+        {/* ALERTAS STOCK */}
         <div className="bg-white rounded-lg shadow border overflow-hidden">
             <div className="p-4 border-b bg-red-50 flex justify-between items-center">
                 <h2 className="font-bold text-lg text-red-800">⚠️ Alertas de Stock</h2>
