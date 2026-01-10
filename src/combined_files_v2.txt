@@ -358,14 +358,10 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
 
   try {
     await prisma.$transaction(async (tx) => {
-      // 1. Calcular el total REAL en el servidor (No confiamos en el frontend)
       let totalReal = 0
-      
-      // Preparamos los items para guardar
       const saleItemsData = []
 
       for (const item of cart) {
-        // Buscamos el producto en la DB para tener el precio y stock ACTUAL
         const variant = await tx.productVariant.findUnique({
           where: { id: item.variantId },
           include: { product: true }
@@ -373,35 +369,30 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
 
         if (!variant) throw new Error(`Producto ${item.variantId} no encontrado`)
         
-        // Validación de Stock Crítica
         if (variant.stock < item.quantity) {
           throw new Error(`Stock insuficiente para ${variant.product.name}`)
         }
 
-        // Sumamos al total (usando el precio de la DB)
         const subtotal = Number(variant.salePrice) * item.quantity
         totalReal += subtotal
 
-        // Preparamos el item de venta (Snapshot de precios)
         saleItemsData.push({
           variantId: variant.id,
-          description: variant.product.name, // Guardamos el nombre por si después cambia
+          description: variant.product.name,
           quantity: item.quantity,
-          costAtSale: variant.costPrice,     // Guardamos el costo histórico
-          priceAtSale: variant.salePrice     // Guardamos el precio histórico
+          costAtSale: variant.costPrice,
+          priceAtSale: variant.salePrice
         })
 
-        // 2. Descontar Stock
         await tx.productVariant.update({
           where: { id: variant.id },
           data: { stock: { decrement: item.quantity } }
         })
 
-        // 3. Auditoría de Movimiento
         await tx.stockMovement.create({
           data: {
             variantId: variant.id,
-            quantity: -item.quantity, // Negativo porque sale
+            quantity: -item.quantity,
             type: "SALE",
             reason: "Venta Mostrador",
             userId: "sistema"
@@ -409,11 +400,10 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
         })
       }
 
-      // 4. Crear la Venta Cabecera
       await tx.sale.create({
         data: {
           total: totalReal,
-          paymentMethod: "CASH", // Por ahora fijo efectivo
+          paymentMethod: "CASH",
           status: "COMPLETED",
           items: {
             create: saleItemsData
@@ -432,18 +422,32 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
   }
 }
 
-// --- AGREGAR ESTO AL FINAL DE: src/actions/sale-actions.ts ---
-
 export async function cancelSale(saleId: string) {
+  console.log(`🔍 [DEBUG] Iniciando anulación para Venta ID: ${saleId}`)
+  
   try {
     await prisma.$transaction(async (tx) => {
-      // 1. Buscar la venta y sus items
+      // 1. Buscar la venta
       const sale = await tx.sale.findUnique({
         where: { id: saleId },
-        include: { items: true }
+        include: { 
+          items: {
+            include: {
+              variant: {
+                include: { product: true }
+              }
+            }
+          } 
+        }
       })
 
-      if (!sale) throw new Error("Venta no encontrada")
+      if (!sale) {
+        console.error("❌ [DEBUG] Venta no encontrada en DB")
+        throw new Error("Venta no encontrada")
+      }
+      
+      console.log(`📄 [DEBUG] Estado actual de la venta: ${sale.status}`)
+      
       if (sale.status === 'CANCELLED') throw new Error("Ya está anulada")
 
       // 2. Marcar como ANULADA
@@ -452,35 +456,60 @@ export async function cancelSale(saleId: string) {
         data: { status: 'CANCELLED' }
       })
 
-      // 3. Devolver el stock de cada producto
+      // 3. Procesar items
       for (const item of sale.items) {
-        if (item.variantId) {
+        console.log(`📦 [DEBUG] Procesando Item: ${item.description} | isSettled: ${item.isSettled}`)
+
+        if (item.variantId && item.variant) {
           // Devolver stock
           await tx.productVariant.update({
             where: { id: item.variantId },
             data: { stock: { increment: item.quantity } }
           })
 
-          // Auditar el movimiento
+          // Auditar movimiento
           await tx.stockMovement.create({
             data: {
               variantId: item.variantId,
-              quantity: item.quantity, // Positivo (Entra de nuevo)
+              quantity: item.quantity,
               type: 'SALE_CANCELLED',
               reason: `Anulación Venta #${sale.id.slice(0, 8)}`,
               userId: 'sistema'
             }
           })
+
+          // CRÍTICO: ¿Está pagado?
+          if (item.isSettled) {
+            console.log("💰 [DEBUG] -> El item ESTÁ LIQUIDADO. Creando BalanceAdjustment...")
+            
+            const amountOwedBack = Number(item.costAtSale) * item.quantity
+            const ownerId = item.variant.product.ownerId
+
+            const adjustment = await tx.balanceAdjustment.create({
+              data: {
+                ownerId: ownerId,
+                amount: -amountOwedBack, 
+                description: `Devolución producto liquidado: ${item.description} (Venta anulada)`,
+                isApplied: false
+              }
+            })
+            console.log(`✅ [DEBUG] Ajuste creado. ID: ${adjustment.id}, Monto: ${adjustment.amount}`)
+
+          } else {
+            console.log("ℹ️ [DEBUG] -> El item NO está liquidado. No se genera deuda al dueño.")
+          }
         }
       }
     })
 
     revalidatePath("/sales")
-    revalidatePath("/products") // Para que se vea el stock actualizado
+    revalidatePath("/products") 
+    revalidatePath("/owners/balance")
     return { success: true }
 
   } catch (error: any) {
-    return { error: error.message }
+    console.error("❌ [DEBUG] Error fatal anulando venta:", error)
+    return { error: error.message || "Error al anular venta" }
   }
 }
 
@@ -499,31 +528,45 @@ export async function createSettlement(formData: FormData) {
   if (!ownerId) throw new Error("ID de dueño requerido")
 
   try {
-    // 1. SEGURIDAD: Volvemos a calcular la deuda en el servidor.
-    // No confiamos en lo que el frontend dice que hay que pagar.
+    // 1. SEGURIDAD: Recalculamos todo en el servidor.
+    
+    // A. Buscar Ventas Pendientes (Suman deuda)
     const pendingItems = await prisma.saleItem.findMany({
       where: {
-        isSettled: false, // Solo lo no pagado
+        isSettled: false,
         variant: {
-          product: {
-            ownerId: ownerId // Solo de este dueño
-          }
+          product: { ownerId: ownerId }
         }
       }
     })
 
-    if (pendingItems.length === 0) {
-      return { error: "No hay nada pendiente para liquidar." }
+    // B. Buscar Ajustes Pendientes (Restan deuda, generalmente)
+    const pendingAdjustments = await prisma.balanceAdjustment.findMany({
+      where: {
+        ownerId: ownerId,
+        isApplied: false
+      }
+    })
+
+    if (pendingItems.length === 0 && pendingAdjustments.length === 0) {
+      return { error: "No hay movimientos pendientes para liquidar." }
     }
 
-    // 2. Calcular total
-    const totalToPay = pendingItems.reduce((sum, item) => {
+    // 2. Calcular Totales
+    const totalSales = pendingItems.reduce((sum, item) => {
       return sum + (Number(item.costAtSale) * item.quantity)
     }, 0)
 
-    // 3. TRANSACCIÓN ATÓMICA (Crear Recibo + Marcar Pagado)
+    const totalAdjustments = pendingAdjustments.reduce((sum, adj) => {
+      return sum + Number(adj.amount)
+    }, 0)
+
+    // Total Neto (Suma algebraica)
+    const totalToPay = totalSales + totalAdjustments
+
+    // 3. TRANSACCIÓN ATÓMICA
     await prisma.$transaction(async (tx) => {
-      // A. Crear la Cabecera de la Rendición (El "Recibo")
+      // A. Crear la Cabecera ("El Recibo")
       const newSettlement = await tx.settlement.create({
         data: {
           ownerId,
@@ -531,17 +574,27 @@ export async function createSettlement(formData: FormData) {
         }
       })
 
-      // B. Marcar cada item como pagado y vincularlo al recibo
-      // Usamos updateMany para ser eficientes, filtrando por los IDs que encontramos arriba
-      await tx.saleItem.updateMany({
-        where: {
-          id: { in: pendingItems.map(i => i.id) }
-        },
-        data: {
-          isSettled: true,
-          settlementId: newSettlement.id
-        }
-      })
+      // B. Marcar items como pagados
+      if (pendingItems.length > 0) {
+        await tx.saleItem.updateMany({
+          where: { id: { in: pendingItems.map(i => i.id) } },
+          data: {
+            isSettled: true,
+            settlementId: newSettlement.id
+          }
+        })
+      }
+
+      // C. Marcar ajustes como aplicados
+      if (pendingAdjustments.length > 0) {
+        await tx.balanceAdjustment.updateMany({
+            where: { id: { in: pendingAdjustments.map(a => a.id) } },
+            data: {
+                isApplied: true,
+                settlementId: newSettlement.id
+            }
+        })
+      }
     })
 
     revalidatePath("/owners/balance")
@@ -551,7 +604,6 @@ export async function createSettlement(formData: FormData) {
     return { error: "Error al procesar el pago." }
   }
 
-  // 4. Redirigir al balance general (que ahora debería mostrar deuda 0)
   redirect("/owners/balance")
 }
 
@@ -995,42 +1047,54 @@ import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 
 export default async function OwnersBalancePage() {
-  // 1. LA CONSULTA MAESTRA
-  // Buscamos dueños y "buceamos" hasta encontrar sus ventas no pagadas
+  // 1. LA CONSULTA MAESTRA ACTUALIZADA
+  // Buscamos dueños, sus ventas pendientes Y sus ajustes pendientes
   const ownersData = await prisma.owner.findMany({
     where: { isActive: true },
     include: {
+      // A. Ventas pendientes (Deuda del Local -> Dueño)
       products: {
         include: {
           variants: {
             include: {
               saleItems: {
-                where: { isSettled: false }, // ⚠️ Solo lo que debemos
+                where: { isSettled: false },
               },
             },
           },
         },
       },
+      // B. Ajustes pendientes (Deuda del Dueño -> Local, usualmente negativo)
+      balanceAdjustments: {
+        where: { isApplied: false }
+      }
     },
   });
 
-  // 2. PROCESAMIENTO DE DATOS (Cálculo en Servidor)
-  // Transformamos la estructura compleja de Prisma en una lista simple para la tabla
+  // 2. PROCESAMIENTO DE DATOS
   const report = ownersData.map((owner) => {
-    let totalDebt = 0;
+    let debtFromSales = 0;
+    let debtFromAdjustments = 0;
     let itemsCount = 0;
 
-    // Recorremos todo el árbol para sumar
+    // A. Sumar deuda por ventas (Mercadería vendida y no pagada)
     owner.products.forEach((product) => {
       product.variants.forEach((variant) => {
         variant.saleItems.forEach((item) => {
-          // REGLA DE ORO: Usamos costAtSale (Histórico), no el costo actual
-          const debtForThisItem = Number(item.costAtSale) * item.quantity;
-          totalDebt += debtForThisItem;
+          debtFromSales += Number(item.costAtSale) * item.quantity;
           itemsCount += item.quantity;
         });
       });
     });
+
+    // B. Sumar deuda por ajustes (Devoluciones de ventas ya pagadas)
+    owner.balanceAdjustments.forEach(adjustment => {
+      debtFromAdjustments += Number(adjustment.amount);
+    });
+
+    // C. Deuda Neta Total (Suma algebraica)
+    // Ejemplo: Ventas ($1000) + Devolución (-$200) = Total a Pagar ($800)
+    const totalDebt = debtFromSales + debtFromAdjustments;
 
     return {
       ownerId: owner.id,
@@ -1038,62 +1102,74 @@ export default async function OwnersBalancePage() {
       phone: owner.phone,
       totalDebt,
       itemsCount,
+      hasAdjustments: owner.balanceAdjustments.length > 0
     };
   });
 
-  // Filtramos para mostrar primero los que tienen saldo a favor
-  const ownersWithDebt = report
-    .filter((r) => r.totalDebt > 0)
-    .sort((a, b) => b.totalDebt - a.totalDebt); // Ordenar de mayor deuda a menor
+  // Filtramos: Mostramos si hay deuda O si hay saldo a favor del local (deuda negativa)
+  const ownersWithActivity = report
+    .filter((r) => r.totalDebt !== 0)
+    .sort((a, b) => b.totalDebt - a.totalDebt);
 
   const ownersClean = report.filter((r) => r.totalDebt === 0);
 
   return (
-    <div className="p-10 max-w-4xl mx-auto">
+    <div className="p-10 max-w-5xl mx-auto">
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-bold">
-          Estado de Cuenta (Deuda a Consignantes)
+          Estado de Cuenta
         </h1>
-        <div className="bg-red-100 text-red-800 px-4 py-2 rounded-lg font-bold border border-red-200">
-          Total Deuda: $
+        <div className="bg-slate-800 text-white px-6 py-3 rounded-lg font-bold shadow-lg">
+          Total a Pagar: $
           {report.reduce((sum, r) => sum + r.totalDebt, 0).toLocaleString()}
         </div>
       </div>
 
-      {/* TABLA DE DEUDORES */}
+      {/* TABLA DE DEUDAS */}
       <div className="bg-white rounded-lg shadow overflow-hidden border mb-10">
         <table className="w-full text-left">
-          <thead className="bg-gray-800 text-white uppercase text-sm">
+          <thead className="bg-gray-100 text-gray-600 uppercase text-xs font-bold border-b">
             <tr>
               <th className="p-4">Dueño</th>
-              <th className="p-4">Items Vendidos (Sin pagar)</th>
-              <th className="p-4">A Pagar</th>
-              <th className="p-4">Acción</th>
+              <th className="p-4 text-center">Items Pend.</th>
+              <th className="p-4 text-right">Saldo Neto</th>
+              <th className="p-4 text-center">Acción</th>
             </tr>
           </thead>
           <tbody className="divide-y">
-            {ownersWithDebt.map((row) => (
-              <tr key={row.ownerId} className="hover:bg-yellow-50 transition">
+            {ownersWithActivity.map((row) => (
+              <tr key={row.ownerId} className="hover:bg-blue-50 transition">
                 <td className="p-4">
                   <p className="font-bold text-lg text-gray-800">{row.name}</p>
                   <p className="text-xs text-gray-500">
                     {row.phone || "Sin teléfono"}
                   </p>
+                  {row.hasAdjustments && (
+                    <span className="text-[10px] bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded border border-yellow-200 inline-block mt-1">
+                      ⚠️ Incluye ajustes/devoluciones
+                    </span>
+                  )}
                 </td>
-                <td className="p-4 font-mono text-lg">{row.itemsCount} u.</td>
-                <td className="p-4">
-                  <span className="text-xl font-bold text-red-600">
+                
+                <td className="p-4 text-center font-mono text-lg text-gray-600">
+                  {row.itemsCount}
+                </td>
+                
+                <td className="p-4 text-right">
+                  <span className={`text-xl font-bold ${row.totalDebt >= 0 ? 'text-red-600' : 'text-green-600'}`}>
                     ${row.totalDebt.toLocaleString()}
                   </span>
+                  {row.totalDebt < 0 && (
+                     <p className="text-xs text-green-600 font-bold">Saldo a favor Local</p>
+                  )}
                 </td>
-                <td className="p-4">
-                  {/* Este botón llevará al detalle para realizar el pago (Próximo paso) */}
-
+                
+                <td className="p-4 text-center">
                   <Link
                     href={`/owners/settlement/${row.ownerId}`}
-                    className="bg-indigo-600 text-white px-4 py-2 rounded text-sm hover:bg-indigo-700 shadow inline-block"
+                    className="bg-indigo-600 text-white px-4 py-2 rounded text-sm hover:bg-indigo-700 shadow inline-block font-medium"
                   >
-                    Liquidar (Pagar)
+                    Ver Detalle
                   </Link>
                 </td>
               </tr>
@@ -1101,26 +1177,27 @@ export default async function OwnersBalancePage() {
           </tbody>
         </table>
 
-        {ownersWithDebt.length === 0 && (
+        {ownersWithActivity.length === 0 && (
           <div className="p-10 text-center text-gray-500 text-lg">
-            ✅ ¡Excelente! No hay deudas pendientes con los dueños.
+            ✅ ¡Todo al día! No hay saldos pendientes.
           </div>
         )}
       </div>
 
-      {/* DUEÑOS AL DÍA (Opcional, para ver que existen) */}
+      {/* DUEÑOS AL DÍA */}
       {ownersClean.length > 0 && (
         <details className="mt-8">
-          <summary className="cursor-pointer text-gray-500 font-medium hover:text-gray-700">
+          <summary className="cursor-pointer text-gray-500 font-medium hover:text-gray-700 select-none">
             Ver dueños sin saldo pendiente ({ownersClean.length})
           </summary>
-          <div className="grid grid-cols-3 gap-4 mt-4 opacity-75">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 opacity-75">
             {ownersClean.map((o) => (
               <div
                 key={o.ownerId}
-                className="border p-3 rounded bg-gray-50 text-sm"
+                className="border p-3 rounded bg-gray-50 text-sm flex justify-between"
               >
-                {o.name}
+                <span>{o.name}</span>
+                <span className="text-green-600 font-bold">✓</span>
               </div>
             ))}
           </div>
@@ -1130,7 +1207,6 @@ export default async function OwnersBalancePage() {
   );
 }
 
-
 --- File: page.tsx (in subfolder: app\owners\settlement\[id]) ---
 
 // src/app/owners/settlement/[id]/page.tsx
@@ -1138,37 +1214,39 @@ export default async function OwnersBalancePage() {
 import { prisma } from "@/lib/prisma"
 import { createSettlement } from "@/actions/settlement-actions"
 import Link from "next/link"
-import SettlementButton from "@/components/SettlementButton" // 👈 Importamos el botón nuevo
+import SettlementButton from "@/components/SettlementButton"
 
-// Definimos que esta página recibe un ID por URL
 interface Props {
   params: Promise<{ id: string }>
 }
 
 export default async function SettlementPage({ params }: Props) {
-  // 1. Obtenemos el ID de la URL
   const { id } = await params
   
-  // 2. Buscamos al dueño y sus items pendientes (isSettled: false)
+  // 1. Buscamos al dueño, sus ventas pendientes Y sus ajustes pendientes
   const owner = await prisma.owner.findUnique({
     where: { id },
     include: {
+      // A. Ventas
       products: {
         include: {
           variants: {
             include: {
               saleItems: {
-                where: { isSettled: false }, // ⚠️ Solo lo que debemos
-                include: { sale: true }      // Para ver la fecha
+                where: { isSettled: false },
+                include: { sale: true }
               }
             }
           }
         }
+      },
+      // B. Ajustes
+      balanceAdjustments: {
+        where: { isApplied: false }
       }
     }
   })
 
-  // Si el ID no existe en la DB
   if (!owner) {
     return (
       <div className="p-10 text-center">
@@ -1178,33 +1256,44 @@ export default async function SettlementPage({ params }: Props) {
     )
   }
 
-  // 3. Procesamos los datos para mostrarlos en la tabla
+  // 2. Unificar listas (Ventas + Ajustes) para la tabla
   let totalToPay = 0
-  
-  // Usamos 'any' en el array temporal para evitar pelear con tipos complejos de Prisma en este paso
   const detailRows: any[] = []
 
+  // Procesar Ventas
   owner.products.forEach(p => {
     p.variants.forEach(v => {
       v.saleItems.forEach(item => {
-        // Usamos costAtSale (lo que valía cuando se vendió)
         const subtotal = Number(item.costAtSale) * item.quantity
         totalToPay += subtotal
         
         detailRows.push({
           id: item.id,
-          productName: item.description,
-          quantity: item.quantity,
-          saleDate: item.sale.createdAt,
-          cost: Number(item.costAtSale),
-          subtotal
+          type: 'SALE',
+          date: item.sale.createdAt,
+          description: `${item.description} (${item.quantity} u.)`,
+          amount: subtotal
         })
       })
     })
   })
 
-  // Ordenamos por fecha (más viejas primero)
-  detailRows.sort((a, b) => a.saleDate.getTime() - b.saleDate.getTime())
+  // Procesar Ajustes
+  owner.balanceAdjustments.forEach(adj => {
+    const amount = Number(adj.amount)
+    totalToPay += amount
+    
+    detailRows.push({
+      id: adj.id,
+      type: 'ADJUSTMENT',
+      date: adj.createdAt,
+      description: adj.description, // Ej: "Devolución Venta..."
+      amount: amount
+    })
+  })
+
+  // Ordenar cronológicamente
+  detailRows.sort((a, b) => a.date.getTime() - b.date.getTime())
 
   return (
     <div className="p-8 max-w-4xl mx-auto">
@@ -1221,21 +1310,20 @@ export default async function SettlementPage({ params }: Props) {
       </div>
 
       {/* CAJA DE RESUMEN Y ACCIÓN */}
-      <div className="bg-gray-50 p-6 rounded-lg border flex flex-col sm:flex-row justify-between items-center mb-8 gap-4">
+      <div className="bg-gray-50 p-6 rounded-lg border flex flex-col sm:flex-row justify-between items-center mb-8 gap-4 shadow-sm">
         <div>
-            <p className="text-sm text-gray-500 uppercase font-bold">Total a Pagar</p>
-            <p className="text-4xl font-bold text-green-700">${totalToPay.toLocaleString()}</p>
+            <p className="text-sm text-gray-500 uppercase font-bold">Total Neto a Pagar</p>
+            <p className={`text-4xl font-bold ${totalToPay >= 0 ? 'text-gray-800' : 'text-green-600'}`}>
+                ${totalToPay.toLocaleString()}
+            </p>
+            {totalToPay < 0 && <span className="text-xs text-green-600 font-bold">Saldo a favor del local</span>}
         </div>
         
-        {/* FORMULARIO */}
-        {totalToPay > 0 ? (
+        {/* Solo mostramos el botón si hay algo que mover (positivo o negativo) */}
+        {detailRows.length > 0 ? (
           <form action={createSettlement}>
-            {/* Campo oculto para decirle a la Server Action a quién pagar */}
             <input type="hidden" name="ownerId" value={owner.id} />
-            
-            {/* Componente Cliente (El botón interactivo) */}
             <SettlementButton />
-            
           </form>
         ) : (
           <div className="bg-green-100 text-green-800 px-4 py-2 rounded font-bold">
@@ -1249,26 +1337,31 @@ export default async function SettlementPage({ params }: Props) {
         <table className="w-full text-left text-sm">
           <thead className="bg-gray-100 text-gray-700 uppercase">
             <tr>
-              <th className="p-3">Fecha Venta</th>
-              <th className="p-3">Producto</th>
-              <th className="p-3 text-right">Cant.</th>
-              <th className="p-3 text-right">Costo Histórico</th>
-              <th className="p-3 text-right">Subtotal</th>
+              <th className="p-3">Fecha</th>
+              <th className="p-3">Concepto</th>
+              <th className="p-3 text-right">Monto</th>
             </tr>
           </thead>
           <tbody className="divide-y">
             {detailRows.map(row => (
               <tr key={row.id} className="hover:bg-gray-50">
                 <td className="p-3 text-gray-500">
-                    {row.saleDate.toLocaleDateString()}
+                    {row.date.toLocaleDateString()}
                 </td>
+                
                 <td className="p-3 font-medium text-gray-800">
-                    {row.productName}
+                    {/* Iconos visuales para distinguir */}
+                    {row.type === 'SALE' ? (
+                        <span className="text-blue-600 mr-2">🛒</span> 
+                    ) : (
+                        <span className="text-orange-500 mr-2">↩️</span>
+                    )}
+                    {row.description}
                 </td>
-                <td className="p-3 text-right">{row.quantity}</td>
-                <td className="p-3 text-right text-gray-500">${row.cost}</td>
-                <td className="p-3 text-right font-bold text-gray-800">
-                    ${row.subtotal}
+                
+                <td className={`p-3 text-right font-bold ${row.amount < 0 ? 'text-green-600' : 'text-gray-800'}`}>
+                    {/* Formato de moneda */}
+                    {row.amount < 0 ? '' : ''}${row.amount.toLocaleString()}
                 </td>
               </tr>
             ))}
@@ -1277,7 +1370,7 @@ export default async function SettlementPage({ params }: Props) {
         
         {detailRows.length === 0 && (
             <div className="p-10 text-center text-gray-400">
-                Este dueño no tiene ventas pendientes de cobro.
+                Este dueño no tiene movimientos pendientes.
             </div>
         )}
       </div>
@@ -1541,24 +1634,16 @@ export default async function EditProductPage({ params }: Props) {
 
 // src/app/sales/page.tsx
 import { prisma } from "@/lib/prisma"
-import { cancelSale } from "@/actions/sale-actions"
-import { revalidatePath } from "next/cache"
+import CancelSaleButton from "@/components/CancelSaleButton" // 👈 Importamos el nuevo componente
 
 export default async function SalesHistoryPage() {
-  // Buscamos las ventas, incluyendo los items para mostrar detalles
+  // Buscamos las ventas
   const sales = await prisma.sale.findMany({
     include: {
       items: true
     },
-    orderBy: { createdAt: 'desc' } // Las más nuevas primero
+    orderBy: { createdAt: 'desc' }
   })
-
-  // Esta función actúa como puente entre el botón y la Server Action
-  async function handleCancel(formData: FormData) {
-    'use server'
-    const saleId = formData.get("saleId") as string
-    await cancelSale(saleId)
-  }
 
   return (
     <div className="p-8 max-w-5xl mx-auto">
@@ -1607,15 +1692,8 @@ export default async function SalesHistoryPage() {
 
                 <td className="p-4">
                   {sale.status === 'COMPLETED' && (
-                    <form action={handleCancel}>
-                      <input type="hidden" name="saleId" value={sale.id} />
-                      <button 
-                        type="submit"
-                        className="text-red-600 hover:text-red-800 text-sm font-semibold border border-red-200 px-3 py-1 rounded hover:bg-red-50"
-                      >
-                        Anular
-                      </button>
-                    </form>
+                    /* 👇 Usamos el componente interactivo aquí */
+                    <CancelSaleButton saleId={sale.id} />
                   )}
                 </td>
               </tr>
@@ -1630,6 +1708,64 @@ export default async function SalesHistoryPage() {
         )}
       </div>
     </div>
+  )
+}
+
+--- File: CancelSaleButton.tsx (in subfolder: components) ---
+
+// src/components/CancelSaleButton.tsx
+'use client'
+
+import { cancelSale } from "@/actions/sale-actions"
+import { useState } from "react"
+
+export default function CancelSaleButton({ saleId }: { saleId: string }) {
+  const [loading, setLoading] = useState(false)
+
+  const handleCancel = async () => {
+    // 1. Log en el NAVEGADOR (Mirar F12 > Console)
+    console.log(`🔵 [CLIENTE] Click en anular venta ID: ${saleId}`)
+
+    const confirmed = confirm("¿Estás SEGURO de anular esta venta?\n\nSi ya fue liquidada, se generará una deuda al dueño.")
+    if (!confirmed) return
+
+    setLoading(true)
+
+    try {
+      // 2. Llamada al Servidor
+      console.log("⏳ [CLIENTE] Llamando al servidor...")
+      const result = await cancelSale(saleId)
+
+      // 3. Respuesta del Servidor
+      console.log("🟢 [CLIENTE] Respuesta recibida:", result)
+
+      if (result.success) {
+        alert("✅ ¡Venta Anulada con Éxito!")
+        // La página se refrescará sola gracias al revalidatePath del servidor
+      } else {
+        alert(`❌ Error: ${result.error}`)
+      }
+    } catch (err) {
+      console.error("🔴 [CLIENTE] Error de red o código:", err)
+      alert("Error inesperado al intentar anular.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <button
+      onClick={handleCancel}
+      disabled={loading}
+      className={`text-sm font-semibold border px-3 py-1 rounded transition
+        ${loading 
+          ? 'bg-gray-200 text-gray-500 cursor-wait' 
+          : 'text-red-600 border-red-200 hover:bg-red-50 hover:text-red-800'
+        }
+      `}
+    >
+      {loading ? "Procesando..." : "Anular"}
+    </button>
   )
 }
 
@@ -2241,408 +2377,4 @@ const globalForPrisma = global as unknown as { prisma: PrismaClient }
 export const prisma = globalForPrisma.prisma || new PrismaClient()
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
-
---- File: schema.prisma (in subfolder: TEMP\prisma) ---
-
-// prisma/schema.prisma
-
-generator client {
-  provider = "prisma-client-js"
-}
-
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-// --- ENUMS ---
-enum Role {
-  ADMIN
-  STAFF
-}
-
-enum StockMovementType {
-  ENTRY           // Ingreso (Remito)
-  SALE            // Venta (Baja automática)
-  ADJUSTMENT      // Ajuste manual (+/- por error/rotura)
-  OWNER_WITHDRAWAL // Retiro del dueño (Baja sin deuda)
-  RETURN          // Devolución de cliente (Alta de stock)
-  SALE_CANCELLED  // Restauración por anulación (Alta)
-}
-
-enum ApptStatus {
-  PENDING
-  CONFIRMED
-  COMPLETED     // Ya realizado
-  BILLED        // Ya cobrado (convertido a venta)
-  CANCELLED
-}
-
-// --- USUARIOS ---
-model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  password  String   // Hashed
-  name      String
-  role      Role     @default(STAFF)
-  createdAt DateTime @default(now())
-}
-
-// --- CATÁLOGO ---
-model Owner {
-  id                 String    @id @default(uuid())
-  name               String
-  phone              String?
-  email              String?
-  isActive           Boolean   @default(true) 
-  createdAt          DateTime  @default(now())
-  products           Product[]
-  settlements        Settlement[]
-  balanceAdjustments BalanceAdjustment[] 
-}
-
-model Category {
-  id       String    @id @default(uuid())
-  name     String    @unique 
-  products Product[]
-}
-
-model Product {
-  id          String    @id @default(uuid())
-  name        String
-  description String?
-  tags        String[]  // Indexar GIN
-  ownerId     String
-  owner       Owner     @relation(fields: [ownerId], references: [id])
-  categoryId  String
-  category    Category  @relation(fields: [categoryId], references: [id])
-  variants    ProductVariant[]
-  isActive    Boolean   @default(true)
-}
-
-model ProductVariant {
-  id        String   @id @default(uuid())
-  productId String
-  product   Product  @relation(fields: [productId], references: [id])
-  name      String   // "S - Rojo"
-  imageUrl  String?  // URL de Cloudinary
-  
-  // PRECIOS FLOTANTES (Valor actual de mercado)
-  costPrice Decimal  @db.Decimal(10, 2) 
-  salePrice Decimal  @db.Decimal(10, 2)
-  stock     Int      @default(0)
-  
-  stockMovements StockMovement[]
-  saleItems      SaleItem[]
-
-  @@unique([productId, name]) 
-}
-
-// --- INVENTARIO ---
-model StockMovement {
-  id          String            @id @default(uuid())
-  variantId   String
-  variant     ProductVariant    @relation(fields: [variantId], references: [id])
-  quantity    Int               // +/- 
-  type        StockMovementType
-  reason      String?
-  userId      String            // Auditoría
-  createdAt   DateTime          @default(now())
-}
-
-// --- VENTAS ---
-model Sale {
-  id            String        @id @default(uuid())
-  total         Decimal       @db.Decimal(10, 2)
-  paymentMethod String        // CASH, TRANSFER, MIXED
-  status        String        @default("COMPLETED") // COMPLETED, CANCELLED
-  createdAt     DateTime      @default(now())
-  items         SaleItem[]
-}
-
-model SaleItem {
-  id            String         @id @default(uuid())
-  saleId        String
-  sale          Sale           @relation(fields: [saleId], references: [id])
-  variantId     String?        // Null si es servicio
-  variant       ProductVariant? @relation(fields: [variantId], references: [id])
-  description   String         // Nombre del producto o servicio al momento de venta
-  quantity      Int
-  
-  // SNAPSHOT (Valor congelado al vender)
-  costAtSale    Decimal        @db.Decimal(10, 2)
-  priceAtSale   Decimal        @db.Decimal(10, 2)
-  
-  // ESTADO FINANCIERO
-  isSettled     Boolean        @default(false) 
-  settlementId  String?
-  settlement    Settlement?    @relation(fields: [settlementId], references: [id])
-}
-
-// --- FINANZAS (RENDICIONES) ---
-model Settlement {
-  id          String   @id @default(uuid())
-  ownerId     String
-  owner       Owner    @relation(fields: [ownerId], references: [id])
-  totalAmount Decimal  @db.Decimal(10, 2) // Total pagado
-  createdAt   DateTime @default(now())
-  items       SaleItem[]
-  adjustments BalanceAdjustment[]
-}
-
-model BalanceAdjustment {
-  id           String      @id @default(uuid())
-  ownerId      String
-  owner        Owner       @relation(fields: [ownerId], references: [id])
-  amount       Decimal     @db.Decimal(10, 2) // Negativo = Crédito a favor Local
-  description  String      // "Devolución Venta #123"
-  isApplied    Boolean     @default(false)
-  settlementId String?
-  settlement   Settlement? @relation(fields: [settlementId], references: [id])
-  createdAt    DateTime    @default(now())
-}
-
-// --- SERVICIOS ---
-model Pet {
-  id          String   @id @default(uuid())
-  name        String
-  ownerName   String
-  ownerPhone  String?
-  breed       String?
-  notes       String?  // Notas generales
-  appointments Appointment[]
-  groomingNotes GroomingNote[]
-}
-
-model Appointment {
-  id        String     @id @default(uuid())
-  petId     String
-  pet       Pet        @relation(fields: [petId], references: [id])
-  startTime DateTime
-  endTime   DateTime
-  status    ApptStatus @default(PENDING)
-  price     Decimal?   @db.Decimal(10, 2)
-}
-
-model GroomingNote {
-  id        String   @id @default(uuid())
-  petId     String
-  pet       Pet      @relation(fields: [petId], references: [id])
-  content   String   @db.Text
-  appointmentId String? // Vínculo opcional
-  createdAt DateTime @default(now())
-}
-
-
---- File: migration.sql (in subfolder: TEMP\prisma\migrations\20260109022200_init_db) ---
-
--- CreateEnum
-CREATE TYPE "Role" AS ENUM ('ADMIN', 'STAFF');
-
--- CreateEnum
-CREATE TYPE "StockMovementType" AS ENUM ('ENTRY', 'SALE', 'ADJUSTMENT', 'OWNER_WITHDRAWAL', 'RETURN', 'SALE_CANCELLED');
-
--- CreateEnum
-CREATE TYPE "ApptStatus" AS ENUM ('PENDING', 'CONFIRMED', 'COMPLETED', 'BILLED', 'CANCELLED');
-
--- CreateTable
-CREATE TABLE "User" (
-    "id" TEXT NOT NULL,
-    "email" TEXT NOT NULL,
-    "password" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "role" "Role" NOT NULL DEFAULT 'STAFF',
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "User_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "Owner" (
-    "id" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "phone" TEXT,
-    "email" TEXT,
-    "isActive" BOOLEAN NOT NULL DEFAULT true,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "Owner_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "Category" (
-    "id" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-
-    CONSTRAINT "Category_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "Product" (
-    "id" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "description" TEXT,
-    "tags" TEXT[],
-    "ownerId" TEXT NOT NULL,
-    "categoryId" TEXT NOT NULL,
-    "isActive" BOOLEAN NOT NULL DEFAULT true,
-
-    CONSTRAINT "Product_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "ProductVariant" (
-    "id" TEXT NOT NULL,
-    "productId" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "imageUrl" TEXT,
-    "costPrice" DECIMAL(10,2) NOT NULL,
-    "salePrice" DECIMAL(10,2) NOT NULL,
-    "stock" INTEGER NOT NULL DEFAULT 0,
-
-    CONSTRAINT "ProductVariant_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "StockMovement" (
-    "id" TEXT NOT NULL,
-    "variantId" TEXT NOT NULL,
-    "quantity" INTEGER NOT NULL,
-    "type" "StockMovementType" NOT NULL,
-    "reason" TEXT,
-    "userId" TEXT NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "StockMovement_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "Sale" (
-    "id" TEXT NOT NULL,
-    "total" DECIMAL(10,2) NOT NULL,
-    "paymentMethod" TEXT NOT NULL,
-    "status" TEXT NOT NULL DEFAULT 'COMPLETED',
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "Sale_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "SaleItem" (
-    "id" TEXT NOT NULL,
-    "saleId" TEXT NOT NULL,
-    "variantId" TEXT,
-    "description" TEXT NOT NULL,
-    "quantity" INTEGER NOT NULL,
-    "costAtSale" DECIMAL(10,2) NOT NULL,
-    "priceAtSale" DECIMAL(10,2) NOT NULL,
-    "isSettled" BOOLEAN NOT NULL DEFAULT false,
-    "settlementId" TEXT,
-
-    CONSTRAINT "SaleItem_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "Settlement" (
-    "id" TEXT NOT NULL,
-    "ownerId" TEXT NOT NULL,
-    "totalAmount" DECIMAL(10,2) NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "Settlement_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "BalanceAdjustment" (
-    "id" TEXT NOT NULL,
-    "ownerId" TEXT NOT NULL,
-    "amount" DECIMAL(10,2) NOT NULL,
-    "description" TEXT NOT NULL,
-    "isApplied" BOOLEAN NOT NULL DEFAULT false,
-    "settlementId" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "BalanceAdjustment_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "Pet" (
-    "id" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "ownerName" TEXT NOT NULL,
-    "ownerPhone" TEXT,
-    "breed" TEXT,
-    "notes" TEXT,
-
-    CONSTRAINT "Pet_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "Appointment" (
-    "id" TEXT NOT NULL,
-    "petId" TEXT NOT NULL,
-    "startTime" TIMESTAMP(3) NOT NULL,
-    "endTime" TIMESTAMP(3) NOT NULL,
-    "status" "ApptStatus" NOT NULL DEFAULT 'PENDING',
-    "price" DECIMAL(10,2),
-
-    CONSTRAINT "Appointment_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "GroomingNote" (
-    "id" TEXT NOT NULL,
-    "petId" TEXT NOT NULL,
-    "content" TEXT NOT NULL,
-    "appointmentId" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "GroomingNote_pkey" PRIMARY KEY ("id")
-);
-
--- CreateIndex
-CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
-
--- CreateIndex
-CREATE UNIQUE INDEX "Category_name_key" ON "Category"("name");
-
--- CreateIndex
-CREATE UNIQUE INDEX "ProductVariant_productId_name_key" ON "ProductVariant"("productId", "name");
-
--- AddForeignKey
-ALTER TABLE "Product" ADD CONSTRAINT "Product_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "Owner"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Product" ADD CONSTRAINT "Product_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "Category"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "ProductVariant" ADD CONSTRAINT "ProductVariant_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "StockMovement" ADD CONSTRAINT "StockMovement_variantId_fkey" FOREIGN KEY ("variantId") REFERENCES "ProductVariant"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "SaleItem" ADD CONSTRAINT "SaleItem_saleId_fkey" FOREIGN KEY ("saleId") REFERENCES "Sale"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "SaleItem" ADD CONSTRAINT "SaleItem_variantId_fkey" FOREIGN KEY ("variantId") REFERENCES "ProductVariant"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "SaleItem" ADD CONSTRAINT "SaleItem_settlementId_fkey" FOREIGN KEY ("settlementId") REFERENCES "Settlement"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Settlement" ADD CONSTRAINT "Settlement_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "Owner"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "BalanceAdjustment" ADD CONSTRAINT "BalanceAdjustment_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "Owner"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "BalanceAdjustment" ADD CONSTRAINT "BalanceAdjustment_settlementId_fkey" FOREIGN KEY ("settlementId") REFERENCES "Settlement"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Appointment" ADD CONSTRAINT "Appointment_petId_fkey" FOREIGN KEY ("petId") REFERENCES "Pet"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "GroomingNote" ADD CONSTRAINT "GroomingNote_petId_fkey" FOREIGN KEY ("petId") REFERENCES "Pet"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
 

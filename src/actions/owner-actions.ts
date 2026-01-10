@@ -1,28 +1,47 @@
 // src/actions/owner-actions.ts
-"use server"; // Esto le dice a Next.js: "Ejecutame en el servidor, no en el navegador"
+"use server";
 
 import { prisma } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 
 export async function createOwner(formData: FormData) {
-  // 1. Extraer datos del formulario HTML
   const name = formData.get("name") as string;
   const email = formData.get("email") as string;
   const phone = formData.get("phone") as string;
 
-  // 2. Validación básica (nunca confíes en el usuario)
-  if (!name) return;
+  if (!name) return { error: "El nombre es obligatorio" };
 
-  // 3. Guardar en Base de Datos
-  await prisma.owner.create({
-    data: {
-      name,
-      email,
-      phone,
-      isActive: true,
-    },
-  });
+  try {
+    await prisma.owner.create({
+      data: { name, email, phone, isActive: true },
+    });
+    revalidatePath("/owners");
+    return { success: true };
+  } catch (error) {
+    return { error: "Error creando dueño" };
+  }
+}
 
-  // 4. Actualizar la pantalla para mostrar el nuevo dato
-  revalidatePath("/owners");
+// 👇 NUEVA FUNCIÓN
+export async function updateOwner(formData: FormData) {
+  const id = formData.get("id") as string;
+  const name = formData.get("name") as string;
+  const email = formData.get("email") as string;
+  const phone = formData.get("phone") as string;
+
+  if (!id || !name) return { error: "Faltan datos" };
+
+  try {
+    await prisma.owner.update({
+      where: { id },
+      data: { name, email, phone },
+    });
+    
+    revalidatePath("/owners");
+    return { success: true };
+  } catch (error) {
+    console.error(error);
+    return { error: "Error actualizando dueño" };
+  }
 }

@@ -1,105 +1,164 @@
 // src/app/dashboard/page.tsx
 import { prisma } from "@/lib/prisma"
+import Link from "next/link"
+import { getLocalDateISO } from "@/lib/utils" // 👈 Importamos
 
 export default async function DashboardPage() {
-  // 1. DEFINIR EL RANGO DE TIEMPO (ESTE MES)
   const now = new Date()
+  
   const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
   const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1)
 
-  // 2. BUSCAR VENTAS DEL MES (COMPLETADAS)
-  const sales = await prisma.sale.findMany({
-    where: {
-      status: "COMPLETED", // Ignoramos las anuladas
-      createdAt: {
-        gte: firstDayOfMonth, // Mayor o igual al día 1
-        lt: nextMonth         // Menor estricto al mes que viene
-      }
-    },
-    include: {
-      items: true // Necesitamos los items para ver el COSTO
-    }
+  // 👇 CAMBIO CLAVE: Usamos la fecha local segura
+  const todayStr = getLocalDateISO() 
+  const startOfToday = new Date(`${todayStr}T00:00:00`)
+  const endOfToday = new Date(`${todayStr}T23:59:59`)
+
+  // ... (El resto del código sigue IGUAL) ...
+  
+  const [monthSales, todaySales, todayAppointments, lowStockVariants] = await Promise.all([
+      // ... tus consultas prisma ...
+      prisma.sale.findMany({
+        where: {
+            status: "COMPLETED",
+            createdAt: { gte: firstDayOfMonth, lt: nextMonth }
+        },
+        include: { items: true }
+      }),
+      prisma.sale.findMany({
+        where: {
+            status: "COMPLETED",
+            createdAt: { gte: startOfToday, lte: endOfToday }
+        }
+      }),
+      prisma.appointment.findMany({
+        where: {
+            startTime: { gte: startOfToday, lte: endOfToday },
+            status: { not: 'CANCELLED' }
+        },
+        include: { pet: true },
+        orderBy: { startTime: 'asc' }
+      }),
+      prisma.productVariant.findMany({
+        where: { stock: { lte: 3 } },
+        include: { product: true },
+        orderBy: { stock: 'asc' },
+        take: 5
+      })
+  ])
+
+  // ... (Resto de cálculos y renderizado igual) ...
+  
+  // (Copiá el resto del archivo anterior o avisame si necesitás que lo pegue todo de nuevo)
+  // Lo importante es que uses `todayStr` generado por `getLocalDateISO()`
+  
+  // Para simplificar, te paso solo el bloque de return, asumiendo que mantenés los cálculos:
+  // ...
+  
+  // Calculos métricas (igual que antes)
+  let monthRevenue = 0
+  let monthCost = 0
+  monthSales.forEach(sale => {
+    monthRevenue += Number(sale.total)
+    sale.items.forEach(item => { if (item.variantId) monthCost += Number(item.costAtSale) * item.quantity })
   })
-
-  // 3. CALCULAR MÉTRICAS
-  let totalRevenue = 0 // Lo que entró a caja
-  let totalCost = 0    // Lo que le debemos/pagamos a los dueños
-  let itemsSold = 0
-
-  sales.forEach(sale => {
-    // Sumamos el total de la venta (Ingreso)
-    totalRevenue += Number(sale.total)
-
-    // Sumamos los costos de los items individuales
-    sale.items.forEach(item => {
-      itemsSold += item.quantity
-      // Ojo: Si es un servicio (variantId null), el costo es 0 (o mano de obra, pero asumimos 0 por ahora)
-      if (item.variantId) {
-        totalCost += Number(item.costAtSale) * item.quantity
-      }
-    })
-  })
-
-  const grossProfit = totalRevenue - totalCost
-  const margin = totalRevenue > 0 ? (grossProfit / totalRevenue) * 100 : 0
+  const monthProfit = monthRevenue - monthCost
+  const monthMargin = monthRevenue > 0 ? (monthProfit / monthRevenue) * 100 : 0
+  const todayRevenue = todaySales.reduce((sum, sale) => sum + Number(sale.total), 0)
+  const todayTransactions = todaySales.length
 
   return (
-    <div className="p-8 max-w-6xl mx-auto">
-      <h1 className="text-3xl font-bold mb-2">Tablero de Control</h1>
+    <div className="p-8 max-w-7xl mx-auto">
+      <h1 className="text-3xl font-bold text-gray-800 mb-2">Tablero de Control</h1>
       <p className="text-gray-500 mb-8">
-        Resumen del mes: {firstDayOfMonth.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })}
+        {/* Mostramos la fecha formateada localmente */}
+        Visión general del negocio hoy, {new Date(todayStr).toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' })}.
       </p>
-
-      {/* TARJETAS DE MÉTRICAS */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-10">
-        
-        {/* CARD 1: VENTAS TOTALES */}
-        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-blue-500">
-          <p className="text-sm text-gray-500 font-bold uppercase">Ventas Brutas</p>
-          <p className="text-3xl font-bold text-gray-800 mt-2">
-            ${totalRevenue.toLocaleString()}
-          </p>
-          <p className="text-xs text-gray-400 mt-1">{sales.length} transacciones</p>
+      
+      {/* ... Resto del JSX idéntico al anterior ... */}
+      
+      {/* SECCIÓN 1: CAJA DEL DÍA */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
+        <div className="bg-gradient-to-br from-green-600 to-green-700 text-white p-6 rounded-lg shadow-lg transform hover:scale-105 transition">
+            <p className="text-green-100 text-sm font-bold uppercase tracking-wider">Caja de Hoy</p>
+            <p className="text-4xl font-bold mt-2">${todayRevenue.toLocaleString()}</p>
+            <p className="text-sm opacity-80 mt-1">{todayTransactions} ventas registradas</p>
         </div>
-
-        {/* CARD 2: COSTOS (A DUEÑOS) */}
-        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-red-500">
-          <p className="text-sm text-gray-500 font-bold uppercase">Costos Mercadería</p>
-          <p className="text-3xl font-bold text-red-700 mt-2">
-            -${totalCost.toLocaleString()}
-          </p>
-          <p className="text-xs text-gray-400 mt-1">A pagar a dueños</p>
+        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-blue-600">
+            <p className="text-gray-500 text-sm font-bold uppercase">Acumulado Mes</p>
+            <p className="text-3xl font-bold text-gray-800 mt-2">${monthRevenue.toLocaleString()}</p>
+            <p className="text-xs text-gray-400 mt-1">
+                Ganancia Neta: <span className="text-green-600 font-bold">${monthProfit.toLocaleString()}</span>
+            </p>
         </div>
-
-        {/* CARD 3: GANANCIA BRUTA */}
-        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-green-500">
-          <p className="text-sm text-gray-500 font-bold uppercase">Ganancia Real</p>
-          <p className="text-3xl font-bold text-green-700 mt-2">
-            ${grossProfit.toLocaleString()}
-          </p>
-          <p className="text-xs text-green-600 mt-1">
-             Margen: {margin.toFixed(1)}%
-          </p>
-        </div>
-
-        {/* CARD 4: VOLUMEN */}
-        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-purple-500">
-          <p className="text-sm text-gray-500 font-bold uppercase">Productos Vendidos</p>
-          <p className="text-3xl font-bold text-gray-800 mt-2">
-            {itemsSold}
-          </p>
-          <p className="text-xs text-gray-400 mt-1">Unidades</p>
+        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-purple-600">
+            <p className="text-gray-500 text-sm font-bold uppercase">Rentabilidad</p>
+            <p className="text-3xl font-bold text-gray-800 mt-2">{monthMargin.toFixed(1)}%</p>
+            <p className="text-xs text-gray-400 mt-1">Margen promedio sobre ventas</p>
         </div>
       </div>
 
-      {/* SUGERENCIA VISUAL: Podríamos poner un gráfico aquí a futuro */}
-      <div className="bg-indigo-50 p-10 rounded-lg border border-indigo-100 text-center">
-        <h3 className="text-indigo-900 font-bold text-lg mb-2">💡 Interpretación</h3>
-        <p className="text-indigo-700 max-w-2xl mx-auto">
-          De cada $100 que entran a la caja, te quedan 
-          <span className="font-bold text-xl mx-1">${margin.toFixed(0)}</span> 
-          para pagar luz, alquiler y tu sueldo. El resto es de los consignantes.
-        </p>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <div className="bg-white rounded-lg shadow border overflow-hidden">
+            <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
+                <h2 className="font-bold text-lg text-gray-800">📅 Agenda de Hoy</h2>
+                <Link href="/agenda" className="text-sm text-blue-600 hover:underline">Ver completa →</Link>
+            </div>
+            {todayAppointments.length === 0 ? (
+                <div className="p-8 text-center text-gray-400">No hay turnos para hoy.</div>
+            ) : (
+                <div className="divide-y">
+                    {todayAppointments.map(appt => {
+                        // Ajustamos visualización de hora
+                        const time = appt.startTime.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' })
+                        return (
+                            <div key={appt.id} className="p-4 flex items-center justify-between hover:bg-gray-50">
+                                <div className="flex items-center gap-3">
+                                    <span className="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded">{time}</span>
+                                    <div>
+                                        <p className="font-bold text-gray-800">{appt.pet.name}</p>
+                                        <p className="text-xs text-gray-500">{appt.pet.breed} - {appt.pet.ownerName}</p>
+                                    </div>
+                                </div>
+                                <div>
+                                    {appt.status === 'PENDING' && <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-1 rounded">Pendiente</span>}
+                                    {appt.status === 'BILLED' && <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">Cobrado</span>}
+                                    {appt.status === 'COMPLETED' && <span className="text-xs bg-gray-100 text-gray-800 px-2 py-1 rounded">Listo</span>}
+                                </div>
+                            </div>
+                        )
+                    })}
+                </div>
+            )}
+        </div>
+
+        <div className="bg-white rounded-lg shadow border overflow-hidden">
+            <div className="p-4 border-b bg-red-50 flex justify-between items-center">
+                <h2 className="font-bold text-lg text-red-800">⚠️ Alertas de Stock</h2>
+                <Link href="/inventory" className="text-sm text-red-600 hover:underline">Gestionar →</Link>
+            </div>
+            {lowStockVariants.length === 0 ? (
+                <div className="p-8 text-center text-gray-400">✅ Inventario saludable.</div>
+            ) : (
+                <div className="divide-y">
+                    {lowStockVariants.map(v => (
+                        <div key={v.id} className="p-4 flex items-center justify-between hover:bg-red-50 transition">
+                            <div className="flex items-center gap-3">
+                                <div className="text-2xl">📦</div>
+                                <div>
+                                    <p className="font-bold text-gray-800">{v.product.name}</p>
+                                    <p className="text-xs text-gray-500">Var: {v.name}</p>
+                                </div>
+                            </div>
+                            <div className="text-right">
+                                <p className={`text-xl font-bold ${v.stock === 0 ? 'text-red-600' : 'text-orange-500'}`}>{v.stock}</p>
+                                <p className="text-[10px] text-gray-400 uppercase font-bold">Unidades</p>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
       </div>
     </div>
   )
