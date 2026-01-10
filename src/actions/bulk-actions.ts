@@ -14,30 +14,56 @@ type ImportRow = {
 
 export async function importSingleProduct(data: ImportRow) {
   try {
-    // 1. BUSCAR O CREAR CATEGORÍA (Case Insensitive)
-    // Truco: Buscamos primero para no fallar por unique constraint
+    // 1. SANITIZACIÓN Y VALIDACIÓN PREVIA (Fail Fast)
+    if (!data.name || !data.categoryName || !data.ownerName) {
+      return { success: false, error: "Datos incompletos: Faltan Nombre, Categoría o Dueño." }
+    }
+
+    // Aseguramos que sean números (por si viene texto o vacío del Excel)
+    const cost = Number(data.cost)
+    const price = Number(data.price)
+
+    if (isNaN(cost) || isNaN(price)) {
+      return { success: false, error: "Formato inválido: Costo y Precio deben ser numéricos." }
+    }
+
+    // 2. REGLAS DE ORO (Validación de Negocio)
+    if (cost < 0 || price < 0) {
+      return { success: false, error: "Error financiero: No se permiten importes negativos." }
+    }
+
+    // Regla: Integridad de Rentabilidad (salvo que sea 0 y 0 para carga inicial pendiente)
+    if (price < cost) {
+      return { success: false, error: `Rentabilidad negativa: Costo ($${cost}) mayor a Venta ($${price}).` }
+    }
+
+    // 3. BUSCAR O CREAR CATEGORÍA
+    // Buscamos exacto o insensible a mayúsculas para evitar duplicados como "Juguetes" y "juguetes"
     let category = await prisma.category.findFirst({
       where: { name: { equals: data.categoryName, mode: 'insensitive' } }
     })
 
     if (!category) {
+      // Si no existe, la creamos (Normalizamos el nombre tal cual viene)
       category = await prisma.category.create({
-        data: { name: data.categoryName } // Creamos si no existe
+        data: { name: data.categoryName } 
       })
     }
 
-    // 2. BUSCAR DUEÑO (Por nombre exacto o aproximado)
-    // Aquí asumimos que el dueño YA DEBE EXISTIR. Si no, es riesgoso crearlo auto.
+    // 4. VALIDAR DUEÑO EXISTENTE
+    // Asumimos que el dueño YA DEBE EXISTIR en la base de datos.
     const owner = await prisma.owner.findFirst({
       where: { name: { equals: data.ownerName, mode: 'insensitive' } }
     })
 
     if (!owner) {
-      return { success: false, error: `Dueño no encontrado: ${data.ownerName}` }
+      return { success: false, error: `Dueño desconocido: "${data.ownerName}". Crealo antes de importar.` }
     }
 
-    // 3. CREAR PRODUCTO Y VARIANTE
+    // 5. TRANSACCIÓN DB (Creación del Producto)
     await prisma.$transaction(async (tx) => {
+      
+      // A. Crear el Producto Padre
       const newProduct = await tx.product.create({
         data: {
           name: data.name,
@@ -47,13 +73,14 @@ export async function importSingleProduct(data: ImportRow) {
         }
       })
 
+      // B. Crear la Variante (Hijo)
       await tx.productVariant.create({
         data: {
           productId: newProduct.id,
           name: "Estándar",
-          costPrice: data.cost,
-          salePrice: data.price,
-          stock: 0, // Siempre nace en 0, luego se hace ingreso de stock
+          costPrice: cost,
+          salePrice: price,
+          stock: 0, // Regla: Siempre nace en 0. Se debe hacer Ingreso de Stock después.
           imageUrl: null 
         }
       })
@@ -62,7 +89,8 @@ export async function importSingleProduct(data: ImportRow) {
     return { success: true }
 
   } catch (error: any) {
-    console.error("Error importando:", error)
-    return { success: false, error: error.message }
+    console.error("Error crítico importando:", error)
+    // Devolvemos el mensaje limpio si es posible
+    return { success: false, error: error.message || "Error interno del servidor" }
   }
 }

@@ -2,31 +2,52 @@
 
 /**
  * Devuelve la fecha actual en Argentina (GMT-3) en formato YYYY-MM-DD.
- * Funciona igual en Vercel, Railway o tu PC local.
+ * Útil para inputs type="date".
  */
 export function getLocalDateISO() {
   const now = new Date()
   
-  // 1. Obtenemos el tiempo UTC puro en milisegundos
-  const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000)
+  // Ajuste manual a GMT-3 (Argentina)
+  // getTimezoneOffset() devuelve minutos. Argentina es UTC-3 (180 min).
+  // Pero para estar 100% seguros independientemente del servidor, forzamos el cálculo:
+  const ARGENTINA_OFFSET = -3 * 60 * 60 * 1000 // -3 horas en milisegundos
   
-  // 2. Restamos 3 horas (Offset Argentina)
-  const ARGENTINA_OFFSET = -3
-  const argentinaTime = new Date(utcTime + (3600000 * ARGENTINA_OFFSET))
+  // Obtenemos el tiempo UTC actual y le restamos 3 horas
+  const utc = now.getTime() + (now.getTimezoneOffset() * 60000)
+  const argentinaTime = new Date(utc + ARGENTINA_OFFSET)
   
-  // 3. Formateamos a ISO (Al haber ajustado el tiempo manualmente, el ISO sale con el día correcto)
   return argentinaTime.toISOString().split('T')[0]
 }
 
 /**
- * Devuelve objetos Date de inicio y fin del día LOCAL
+ * Convierte un string "YYYY-MM-DD" y una hora "HH:MM" en un objeto Date
+ * que representa ese momento EXACTO en Argentina (GMT-3).
+ * El servidor lo guardará como UTC, pero el punto en el tiempo será el correcto.
  */
-export function getLocalDayRange(dateStr?: string) {
+export function buildArgentinaDate(dateStr: string, timeStr: string = "00:00:00"): Date {
+    // Si timeStr viene solo como "14:30", le agregamos segundos para cumplir formato ISO
+    const timeFull = timeStr.length === 5 ? `${timeStr}:00` : timeStr
+    
+    // Construimos ISO forzando el offset "-03:00"
+    const isoString = `${dateStr}T${timeFull}-03:00`
+    
+    return new Date(isoString)
+}
+
+/**
+ * Devuelve el rango de inicio y fin de un día en Argentina.
+ * Útil para filtros de base de datos (Prisma gte/lte).
+ */
+export function getArgentinaDayRange(dateStr?: string) {
     const targetDate = dateStr || getLocalDateISO()
     
-    // Al agregar la hora explícita T00:00:00, JS entiende que es hora LOCAL del sistema, no UTC.
-    const start = new Date(`${targetDate}T00:00:00`)
-    const end = new Date(`${targetDate}T23:59:59`)
+    // Inicio del día: 00:00:00.000
+    const start = buildArgentinaDate(targetDate, "00:00:00")
+    
+    // Fin del día: 23:59:59.999
+    // Nota: Usamos buildArgentinaDate base y ajustamos manual o pasamos hora final
+    // Para mayor precisión, seteamos la hora final
+    const end = new Date(buildArgentinaDate(targetDate, "23:59:59").getTime() + 999)
     
     return { start, end, dateStr: targetDate }
 }

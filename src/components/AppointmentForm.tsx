@@ -8,7 +8,7 @@ import { useRouter } from "next/navigation"
 
 type Props = {
   pets: { id: string, name: string, breed: string | null }[]
-  selectedDate: string
+  selectedDate: string // Viene 'YYYY-MM-DD'
 }
 
 export default function AppointmentForm({ pets, selectedDate }: Props) {
@@ -16,43 +16,34 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
   const router = useRouter()
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault() // Evitamos la recarga normal del navegador
+    e.preventDefault() 
     setLoading(true)
 
-    // Capturamos los datos del formulario
     const form = e.currentTarget
     const formData = new FormData(form)
 
-    // Agregamos la fecha que viene por prop (porque el input hidden a veces es mañoso)
-    formData.set("date", selectedDate)
-
-    // Llamamos al Server Action
+    // Nota: Ahora 'date' viene del input visible, ya no lo inyectamos manualmente
+    
     const result = await createAppointment(formData)
 
     setLoading(false)
 
     if (result.error) {
-      // 🛑 ERROR: Mostramos alerta con el motivo
       alert("❌ NO SE PUDO AGENDAR:\n" + result.error)
     } else {
-      // ✅ ÉXITO: Limpiamos y refrescamos la vista
       alert("✅ Turno agendado correctamente")
-      form.reset() // Limpia los inputs
-      router.refresh() // Recarga los datos de la agenda a la izquierda
+      form.reset() 
+      router.refresh()
     }
   }
 
   return (
-    <div className="bg-slate-50 p-6 rounded-lg border border-slate-200 sticky top-4 shadow-sm">
+    <div className="bg-slate-50 p-6 rounded-lg border border-slate-200 shadow-sm sticky top-6">
       <h2 className="text-xl font-bold mb-4 text-slate-800">Agendar Turno</h2>
       
       <form onSubmit={handleSubmit} className="space-y-4">
         
-        {/* Mostramos visualmente la fecha para que el usuario sepa dónde está parado */}
-        <div className="text-sm text-slate-500 font-bold uppercase tracking-wider mb-2">
-           Fecha: {selectedDate}
-        </div>
-
+        {/* SELECCIÓN DE MASCOTA */}
         <div>
           <label className="block text-sm font-bold text-gray-700 mb-1">Mascota</label>
           <select name="petId" required className="w-full p-2 border rounded bg-white focus:ring-2 focus:ring-blue-500 outline-none">
@@ -68,6 +59,19 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
           </div>
         </div>
 
+        {/* FECHA (Ahora editable) */}
+        <div>
+            <label className="block text-sm font-bold text-gray-700 mb-1">Fecha</label>
+            <input 
+                type="date" 
+                name="date"
+                defaultValue={selectedDate} // Pre-cargamos la fecha actual de la vista
+                required
+                className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 outline-none"
+            />
+        </div>
+
+        {/* HORA Y DURACIÓN */}
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-bold text-gray-700 mb-1">Hora Inicio</label>

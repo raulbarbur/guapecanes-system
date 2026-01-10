@@ -2,14 +2,13 @@
 'use client'
 
 import { useState } from "react"
-import { createProduct, updateProduct } from "@/actions/product-actions" // 👈 Importamos update
+import { createProduct, updateProduct } from "@/actions/product-actions"
 import ImageUpload from "./ImageUpload"
-import { useRouter } from "next/navigation" // Para volver atrás después de editar
+import { useRouter } from "next/navigation"
 
 type Props = {
   owners: { id: string; name: string }[]
   categories: { id: string; name: string }[]
-  // 👇 NUEVO: Datos opcionales para edición
   initialData?: {
     id: string
     name: string
@@ -25,21 +24,43 @@ type Props = {
 export default function ProductForm({ owners, categories, initialData }: Props) {
   const router = useRouter()
   const [imageUrl, setImageUrl] = useState(initialData?.imageUrl || "")
+  const [loading, setLoading] = useState(false) // Feedback visual
   
-  // Función wrapper para manejar la redirección post-guardado si es edición
   const handleSubmit = async (formData: FormData) => {
+    setLoading(true)
+
+    // Agregamos la URL de la imagen manualmente al FormData si cambió
+    if (imageUrl) {
+        // Si el input file está vacío pero tenemos URL en el estado (por carga previa), aseguramos enviarla
+        // Nota: En este form simple confiamos en el input hidden, pero esto refuerza.
+    }
+
+    let result;
+
     if (initialData) {
         // MODO EDICIÓN
-        formData.append("id", initialData.id) // Agregamos el ID oculto
-        await updateProduct(formData)
-        alert("Producto actualizado correctamente")
-        router.push("/products") // Volver al listado
-        router.refresh() // Refrescar datos visuales
+        formData.append("id", initialData.id)
+        result = await updateProduct(formData)
+        
+        if (result?.success) {
+            alert("✅ Producto actualizado correctamente")
+            router.push("/products")
+            router.refresh()
+        } else {
+            alert("❌ Error al actualizar:\n" + result?.error)
+        }
+
     } else {
         // MODO CREACIÓN
-        await createProduct(formData)
-        // createProduct ya hace redirect, no hace falta lógica aquí
+        // createProduct hace redirect si todo sale bien. Si retorna algo, es un error.
+        result = await createProduct(formData)
+        
+        if (result?.error) {
+            alert("❌ No se pudo crear el producto:\n" + result.error)
+        }
     }
+    
+    setLoading(false)
   }
 
   return (
@@ -55,10 +76,10 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
           <label className="block text-sm font-medium text-gray-700">Nombre *</label>
           <input 
             name="name" 
-            defaultValue={initialData?.name} // 👈 Pre-carga
+            defaultValue={initialData?.name} 
             type="text" 
             required 
-            className="w-full border p-2 rounded" 
+            className="w-full border p-2 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
           />
         </div>
 
@@ -68,7 +89,7 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
           <textarea 
             name="description" 
             defaultValue={initialData?.description || ""} 
-            className="w-full border p-2 rounded" 
+            className="w-full border p-2 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
             rows={2} 
           />
         </div>
@@ -81,7 +102,7 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
               name="ownerId" 
               defaultValue={initialData?.ownerId || ""} 
               required 
-              className="w-full border p-2 rounded bg-white"
+              className="w-full border p-2 rounded bg-white focus:ring-2 focus:ring-blue-500 outline-none"
             >
               <option value="">Seleccionar...</option>
               {owners.map(o => (
@@ -96,7 +117,7 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
               name="categoryId" 
               defaultValue={initialData?.categoryId || ""} 
               required 
-              className="w-full border p-2 rounded bg-white"
+              className="w-full border p-2 rounded bg-white focus:ring-2 focus:ring-blue-500 outline-none"
             >
               <option value="">Seleccionar...</option>
               {categories.map(c => (
@@ -107,28 +128,36 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
         </div>
 
         {/* Precios */}
-        <div className="grid grid-cols-2 gap-4 bg-gray-50 p-4 rounded">
+        <div className="grid grid-cols-2 gap-4 bg-gray-50 p-4 rounded border">
           <div>
             <label className="block text-sm font-medium text-gray-700">Costo (Dueño) *</label>
-            <input 
-                name="costPrice" 
-                defaultValue={initialData?.costPrice} 
-                type="number" 
-                step="0.01" 
-                required 
-                className="w-full border p-2 rounded" 
-            />
+            <div className="relative">
+                <span className="absolute left-3 top-2 text-gray-500">$</span>
+                <input 
+                    name="costPrice" 
+                    defaultValue={initialData?.costPrice} 
+                    type="number" 
+                    step="0.01" 
+                    min="0"
+                    required 
+                    className="w-full border p-2 pl-7 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
+                />
+            </div>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700">Precio Venta *</label>
-            <input 
-                name="salePrice" 
-                defaultValue={initialData?.salePrice} 
-                type="number" 
-                step="0.01" 
-                required 
-                className="w-full border p-2 rounded" 
-            />
+            <div className="relative">
+                <span className="absolute left-3 top-2 text-gray-500">$</span>
+                <input 
+                    name="salePrice" 
+                    defaultValue={initialData?.salePrice} 
+                    type="number" 
+                    step="0.01" 
+                    min="0"
+                    required 
+                    className="w-full border p-2 pl-7 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
+                />
+            </div>
           </div>
         </div>
 
@@ -144,8 +173,17 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
           <input type="hidden" name="imageUrl" value={imageUrl} />
         </div>
 
-        <button type="submit" className="w-full bg-blue-600 text-white py-3 rounded hover:bg-blue-700 font-bold">
-          {initialData ? "Actualizar Cambios" : "Guardar Producto"}
+        <button 
+            type="submit" 
+            disabled={loading}
+            className={`w-full text-white py-3 rounded font-bold shadow transition
+                ${loading 
+                    ? 'bg-gray-400 cursor-not-allowed' 
+                    : 'bg-blue-600 hover:bg-blue-700 transform active:scale-95'
+                }
+            `}
+        >
+          {loading ? "Procesando..." : (initialData ? "Actualizar Cambios" : "Guardar Producto")}
         </button>
 
       </form>

@@ -5,46 +5,54 @@
 
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
-import { redirect } from "next/navigation"
+import { buildArgentinaDate } from "@/lib/utils" // 👈 Importamos
+
+type ApptStatus = 'PENDING' | 'CONFIRMED' | 'COMPLETED' | 'BILLED' | 'CANCELLED'
 
 export async function createAppointment(formData: FormData) {
   const petId = formData.get("petId") as string
   const dateStr = formData.get("date") as string // "2024-01-20"
   const timeStr = formData.get("time") as string // "14:30"
-  const duration = parseInt(formData.get("duration") as string) || 60 // Minutos
+  const duration = parseInt(formData.get("duration") as string) || 60 
 
   if (!petId || !dateStr || !timeStr) {
     return { error: "Faltan datos (Mascota, Fecha u Hora)" }
   }
 
   try {
-    // 1. CONSTRUIR FECHAS (Start y End)
-    // Combinamos fecha y hora en un objeto Date
-    const startTime = new Date(`${dateStr}T${timeStr}:00`)
-    // Calculamos el final sumando minutos
+    // 1. CONSTRUIR FECHAS (Usando utilidad centralizada)
+    const startTime = buildArgentinaDate(dateStr, timeStr)
+    
+    // Calculamos el final
     const endTime = new Date(startTime.getTime() + duration * 60000)
 
-    // Validar que sea una fecha válida
     if (isNaN(startTime.getTime())) {
       return { error: "Fecha u hora inválida" }
     }
 
-    // 2. VALIDAR COLISIONES (La Regla de Oro)
-    // Buscamos si existe algún turno que NO esté cancelado Y que se superponga
+    // 2. VALIDAR COLISIONES
     const collision = await prisma.appointment.findFirst({
       where: {
-        status: { not: 'CANCELLED' }, // Ignoramos los cancelados
+        status: { not: 'CANCELLED' }, 
         AND: [
-          { startTime: { lt: endTime } }, // Que empiece antes de que yo termine
-          { endTime: { gt: startTime } }  // Y que termine después de que yo empiece
+          { startTime: { lt: endTime } }, 
+          { endTime: { gt: startTime } }  
         ]
       },
       include: { pet: true }
     })
 
     if (collision) {
+        // Formateamos para el mensaje de error
+        const collisionStart = collision.startTime.toLocaleTimeString('es-AR', {
+            hour: '2-digit', minute:'2-digit', timeZone: 'America/Argentina/Buenos_Aires'
+        })
+        const collisionEnd = collision.endTime.toLocaleTimeString('es-AR', {
+            hour: '2-digit', minute:'2-digit', timeZone: 'America/Argentina/Buenos_Aires'
+        })
+
       return { 
-        error: `Horario ocupado por ${collision.pet.name} (${collision.startTime.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} - ${collision.endTime.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})})` 
+        error: `Horario ocupado por ${collision.pet.name} (${collisionStart} - ${collisionEnd})` 
       }
     }
 
@@ -59,6 +67,7 @@ export async function createAppointment(formData: FormData) {
     })
 
     revalidatePath("/agenda")
+    revalidatePath("/dashboard")
     return { success: true }
 
   } catch (error) {
@@ -75,8 +84,24 @@ export async function cancelAppointment(formData: FormData) {
             data: { status: 'CANCELLED' }
         })
         revalidatePath("/agenda")
+        revalidatePath("/dashboard")
     } catch (error) {
         console.error(error)
+    }
+}
+
+export async function updateAppointmentStatus(id: string, newStatus: ApptStatus) {
+    try {
+        await prisma.appointment.update({
+            where: { id },
+            data: { status: newStatus }
+        })
+        revalidatePath("/agenda")
+        revalidatePath("/dashboard")
+        return { success: true }
+    } catch (error) {
+        console.error("Error cambiando estado:", error)
+        return { error: "No se pudo actualizar el estado" }
     }
 }
 
@@ -98,30 +123,56 @@ type ImportRow = {
 
 export async function importSingleProduct(data: ImportRow) {
   try {
-    // 1. BUSCAR O CREAR CATEGORÍA (Case Insensitive)
-    // Truco: Buscamos primero para no fallar por unique constraint
+    // 1. SANITIZACIÓN Y VALIDACIÓN PREVIA (Fail Fast)
+    if (!data.name || !data.categoryName || !data.ownerName) {
+      return { success: false, error: "Datos incompletos: Faltan Nombre, Categoría o Dueño." }
+    }
+
+    // Aseguramos que sean números (por si viene texto o vacío del Excel)
+    const cost = Number(data.cost)
+    const price = Number(data.price)
+
+    if (isNaN(cost) || isNaN(price)) {
+      return { success: false, error: "Formato inválido: Costo y Precio deben ser numéricos." }
+    }
+
+    // 2. REGLAS DE ORO (Validación de Negocio)
+    if (cost < 0 || price < 0) {
+      return { success: false, error: "Error financiero: No se permiten importes negativos." }
+    }
+
+    // Regla: Integridad de Rentabilidad (salvo que sea 0 y 0 para carga inicial pendiente)
+    if (price < cost) {
+      return { success: false, error: `Rentabilidad negativa: Costo ($${cost}) mayor a Venta ($${price}).` }
+    }
+
+    // 3. BUSCAR O CREAR CATEGORÍA
+    // Buscamos exacto o insensible a mayúsculas para evitar duplicados como "Juguetes" y "juguetes"
     let category = await prisma.category.findFirst({
       where: { name: { equals: data.categoryName, mode: 'insensitive' } }
     })
 
     if (!category) {
+      // Si no existe, la creamos (Normalizamos el nombre tal cual viene)
       category = await prisma.category.create({
-        data: { name: data.categoryName } // Creamos si no existe
+        data: { name: data.categoryName } 
       })
     }
 
-    // 2. BUSCAR DUEÑO (Por nombre exacto o aproximado)
-    // Aquí asumimos que el dueño YA DEBE EXISTIR. Si no, es riesgoso crearlo auto.
+    // 4. VALIDAR DUEÑO EXISTENTE
+    // Asumimos que el dueño YA DEBE EXISTIR en la base de datos.
     const owner = await prisma.owner.findFirst({
       where: { name: { equals: data.ownerName, mode: 'insensitive' } }
     })
 
     if (!owner) {
-      return { success: false, error: `Dueño no encontrado: ${data.ownerName}` }
+      return { success: false, error: `Dueño desconocido: "${data.ownerName}". Crealo antes de importar.` }
     }
 
-    // 3. CREAR PRODUCTO Y VARIANTE
+    // 5. TRANSACCIÓN DB (Creación del Producto)
     await prisma.$transaction(async (tx) => {
+      
+      // A. Crear el Producto Padre
       const newProduct = await tx.product.create({
         data: {
           name: data.name,
@@ -131,13 +182,14 @@ export async function importSingleProduct(data: ImportRow) {
         }
       })
 
+      // B. Crear la Variante (Hijo)
       await tx.productVariant.create({
         data: {
           productId: newProduct.id,
           name: "Estándar",
-          costPrice: data.cost,
-          salePrice: data.price,
-          stock: 0, // Siempre nace en 0, luego se hace ingreso de stock
+          costPrice: cost,
+          salePrice: price,
+          stock: 0, // Regla: Siempre nace en 0. Se debe hacer Ingreso de Stock después.
           imageUrl: null 
         }
       })
@@ -146,8 +198,9 @@ export async function importSingleProduct(data: ImportRow) {
     return { success: true }
 
   } catch (error: any) {
-    console.error("Error importando:", error)
-    return { success: false, error: error.message }
+    console.error("Error crítico importando:", error)
+    // Devolvemos el mensaje limpio si es posible
+    return { success: false, error: error.message || "Error interno del servidor" }
   }
 }
 
@@ -186,68 +239,100 @@ export async function createCategory(formData: FormData) {
 
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
-import { redirect } from "next/navigation"
+
+// Definimos los tipos permitidos según el Schema y la UI
+type MovementType = "ENTRY" | "OWNER_WITHDRAWAL" | "ADJUSTMENT"
 
 export async function registerStockMovement(formData: FormData) {
   const variantId = formData.get("variantId") as string
-  const quantity = parseInt(formData.get("quantity") as string)
   const reason = formData.get("reason") as string
-  // Capturamos el tipo de movimiento del formulario
-  const type = formData.get("type") as "ENTRY" | "OWNER_WITHDRAWAL"
+  const type = formData.get("type") as MovementType
+  
+  // Convertimos y validamos número
+  const rawQuantity = parseInt(formData.get("quantity") as string)
 
-  if (!variantId || quantity <= 0 || !type) {
-    throw new Error("Datos inválidos")
+  // 1. VALIDACIÓN PREVIA (Fail Fast)
+  if (!variantId || !type) {
+    return { error: "Faltan datos obligatorios." }
+  }
+  
+  if (isNaN(rawQuantity) || rawQuantity <= 0) {
+    return { error: "La cantidad debe ser un número positivo mayor a 0." }
   }
 
   try {
-    // ⚠️ VALIDACIÓN CRÍTICA PARA RETIROS
-    // Si van a sacar mercadería, primero vemos si alcanza.
-    if (type === "OWNER_WITHDRAWAL") {
-      const currentVariant = await prisma.productVariant.findUnique({
-        where: { id: variantId }
-      })
+    // 2. DETERMINAR EL SIGNO DEL MOVIMIENTO
+    // ENTRY: Suma (+)
+    // OWNER_WITHDRAWAL: Resta (-)
+    // ADJUSTMENT: Según UI actual es "Baja/Rotura", así que Resta (-)
+    let finalQuantity = rawQuantity
+    
+    if (type === "OWNER_WITHDRAWAL" || type === "ADJUSTMENT") {
+        finalQuantity = -rawQuantity
+    }
 
-      if (!currentVariant || currentVariant.stock < quantity) {
-        // Retornamos un objeto de error en lugar de lanzar excepción para manejarlo en UI (simple)
-        // Nota: En un sistema más avanzado, usaríamos try/catch en el componente cliente.
-        console.error("Stock insuficiente")
-        return { error: `Stock insuficiente. Tienes ${currentVariant?.stock || 0}` }
+    // 3. OBTENER VARIANTE ACTUAL (Para validar stock)
+    const currentVariant = await prisma.productVariant.findUnique({
+        where: { id: variantId },
+        include: { product: true }
+    })
+
+    if (!currentVariant) return { error: "Producto no encontrado." }
+
+    // 4. VALIDAR STOCK PARA SALIDAS (Regla de Oro)
+    // Si el movimiento es negativo, verificamos que no rompa el stock (negativo prohibido)
+    if (finalQuantity < 0) {
+      const quantityNeeded = Math.abs(finalQuantity)
+      if (currentVariant.stock < quantityNeeded) {
+        return { 
+            error: `Stock insuficiente en "${currentVariant.product.name}". Tenés ${currentVariant.stock}, intentás sacar ${quantityNeeded}.` 
+        }
       }
     }
 
+    // 5. TRANSACCIÓN ATÓMICA
     await prisma.$transaction([
-      // 1. Crear el movimiento histórico (La auditoría)
+      // A. Crear el movimiento histórico (Auditoría)
       prisma.stockMovement.create({
         data: {
           variantId,
-          quantity: type === "ENTRY" ? quantity : -quantity, // Positivo si entra, Negativo si sale
-          type: type, // ENTRY o OWNER_WITHDRAWAL
-          reason: reason || (type === "ENTRY" ? "Ingreso manual" : "Retiro de dueño"),
-          userId: "sistema",
+          quantity: finalQuantity, // Guardamos con signo (+ o -)
+          type: type, 
+          reason: reason || getDefaultReason(type),
+          userId: "sistema", 
         }
       }),
 
-      // 2. Actualizar el stock actual (El contador)
+      // B. Actualizar el stock actual (Contador)
       prisma.productVariant.update({
         where: { id: variantId },
         data: {
-          stock: type === "ENTRY" 
-            ? { increment: quantity } // Si entra, suma
-            : { decrement: quantity } // Si sale, resta
+          stock: { increment: finalQuantity } // increment maneja restas si el número es negativo
         }
       })
     ])
 
+    // Revalidamos caché
     revalidatePath("/products")
-    revalidatePath("/inventory") // Revalidamos la misma página por si queremos ver cambios
+    revalidatePath("/inventory")
+    revalidatePath("/dashboard")
+
+    return { success: true }
 
   } catch (error) {
     console.error("Error gestionando stock:", error)
-    return { error: "Falló el movimiento de stock" }
+    return { error: "Falló el movimiento de stock. Intente nuevamente." }
   }
+}
 
-  // Redirigimos para limpiar el formulario
-  redirect("/products")
+// Función auxiliar para textos por defecto
+function getDefaultReason(type: MovementType): string {
+    switch (type) {
+        case "ENTRY": return "Ingreso de mercadería"
+        case "OWNER_WITHDRAWAL": return "Retiro de dueño"
+        case "ADJUSTMENT": return "Baja por rotura/pérdida"
+        default: return "Movimiento de stock"
+    }
 }
 
 --- File: note-actions.ts (in subfolder: actions) ---
@@ -404,27 +489,40 @@ import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
 export async function createProduct(formData: FormData) {
-  // 1. Obtener datos simples
+  // 1. Obtener datos
   const name = formData.get("name") as string
   const description = formData.get("description") as string
   const ownerId = formData.get("ownerId") as string
   const categoryId = formData.get("categoryId") as string
-  const imageUrl = formData.get("imageUrl") as string // URL de Cloudinary
+  const imageUrl = formData.get("imageUrl") as string 
   
-  // 2. Obtener y convertir números (Prisma usa Strings para Decimals, pero validamos aquí)
+  // Convertir números
   const costPrice = parseFloat(formData.get("costPrice") as string)
   const salePrice = parseFloat(formData.get("salePrice") as string)
 
-  // Validaciones básicas
-  if (!name || !ownerId || !categoryId || !costPrice || !salePrice) {
-    throw new Error("Faltan datos obligatorios")
+  // 2. VALIDACIONES DE SISTEMA
+  if (!name || !ownerId || !categoryId) {
+    return { error: "Faltan datos obligatorios (Nombre, Dueño o Categoría)" }
+  }
+
+  if (isNaN(costPrice) || isNaN(salePrice)) {
+    return { error: "Los precios deben ser números válidos." }
+  }
+
+  // 3. VALIDACIONES DE NEGOCIO (Reglas de Oro)
+  if (costPrice < 0 || salePrice < 0) {
+    return { error: "Los precios no pueden ser negativos." }
+  }
+
+  // Regla: No vender a pérdida (salvo excepciones, pero por defecto protegemos)
+  if (salePrice < costPrice) {
+    return { error: `ERROR DE RENTABILIDAD: Estás vendiendo a $${salePrice} algo que costó $${costPrice}.` }
   }
 
   try {
-    // 3. LA TRANSACCIÓN (Todo o Nada)
+    // 4. LA TRANSACCIÓN
     await prisma.$transaction(async (tx) => {
-      
-      // A. Crear el "Padre" (Producto genérico)
+      // A. Crear Producto
       const newProduct = await tx.product.create({
         data: {
           name,
@@ -435,33 +533,29 @@ export async function createProduct(formData: FormData) {
         }
       })
 
-      // B. Crear el "Hijo" (Variante inicial)
-      // Usamos el ID del padre que acabamos de crear (newProduct.id)
+      // B. Crear Variante Inicial (Stock 0 siempre)
       await tx.productVariant.create({
         data: {
           productId: newProduct.id,
-          name: "Estándar", // Por ahora, variante única por defecto
+          name: "Estándar",
           imageUrl: imageUrl || null,
           costPrice: costPrice,
           salePrice: salePrice,
-          stock: 0 // Regla de oro: Nace con stock 0. Se carga después.
+          stock: 0 
         }
       })
     })
 
-    // 4. Si todo salió bien
     revalidatePath("/products")
 
   } catch (error) {
     console.error("Error creando producto:", error)
-    return { error: "Error al guardar el producto" }
+    return { error: "Error interno al guardar el producto." }
   }
   
-  // Redirigir al listado (fuera del try/catch)
+  // 5. Redirección exitosa (fuera del try/catch)
   redirect("/products")
 }
-
-// --- AGREGAR AL FINAL DE src/actions/product-actions.ts ---
 
 export async function updateProduct(formData: FormData) {
   const id = formData.get("id") as string
@@ -469,22 +563,27 @@ export async function updateProduct(formData: FormData) {
   const description = formData.get("description") as string
   const categoryId = formData.get("categoryId") as string
   const ownerId = formData.get("ownerId") as string
+  const imageUrl = formData.get("imageUrl") as string
+  
   const costPrice = parseFloat(formData.get("costPrice") as string)
   const salePrice = parseFloat(formData.get("salePrice") as string)
-  const imageUrl = formData.get("imageUrl") as string
 
-  if (!id || !name || !costPrice || !salePrice) throw new Error("Datos faltantes")
+  if (!id || !name) return { error: "Datos faltantes" }
+
+  // Validaciones de Negocio también al editar
+  if (isNaN(costPrice) || isNaN(salePrice)) return { error: "Precios inválidos" }
+  if (costPrice < 0 || salePrice < 0) return { error: "Precios negativos no permitidos" }
+  if (salePrice < costPrice) return { error: `Rentabilidad negativa: Costo $${costPrice} > Venta $${salePrice}` }
 
   try {
     await prisma.$transaction(async (tx) => {
-      // 1. Actualizar datos base del producto
+      // 1. Actualizar producto base
       await tx.product.update({
         where: { id },
         data: { name, description, categoryId, ownerId }
       })
 
-      // 2. Actualizar precios en la variante (Asumimos variante única por ahora)
-      // Primero buscamos la variante asociada a este producto
+      // 2. Actualizar precios en la variante
       const variant = await tx.productVariant.findFirst({ where: { productId: id } })
       
       if (variant) {
@@ -493,7 +592,6 @@ export async function updateProduct(formData: FormData) {
           data: {
             costPrice,
             salePrice,
-            // Si viene una imagen nueva, la actualizamos. Si viene vacía, NO la tocamos (mantenemos la vieja)
             ...(imageUrl ? { imageUrl } : {}) 
           }
         })
@@ -501,7 +599,7 @@ export async function updateProduct(formData: FormData) {
     })
 
     revalidatePath("/products")
-    revalidatePath("/pos") // Importante: actualizar precios en el punto de venta
+    revalidatePath("/pos") 
     return { success: true }
 
   } catch (error) {
@@ -513,7 +611,7 @@ export async function updateProduct(formData: FormData) {
 export async function toggleProductStatus(productId: string, currentStatus: boolean) {
   try {
     // REGLA DE ORO: No archivar si hay stock positivo
-    if (currentStatus === true) { // Si queremos desactivar...
+    if (currentStatus === true) { 
       const variant = await prisma.productVariant.findFirst({ where: { productId } })
       if (variant && variant.stock > 0) {
         return { error: "No se puede archivar un producto con stock. Hacé un retiro o ajuste a 0 primero." }
@@ -541,31 +639,36 @@ export async function toggleProductStatus(productId: string, currentStatus: bool
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
 
-// Definimos la estructura del carrito polimórfico (Producto o Servicio)
 type CartItem = {
   type: 'PRODUCT' | 'SERVICE'
-  id: string       // variantId (si es producto) O appointmentId (si es servicio)
+  id: string
   description: string
-  price: number    // Precio final de venta
+  price: number
   quantity: number
 }
 
-export async function processSale(cart: CartItem[], totalEstimado: number) {
+type PaymentMethod = "CASH" | "TRANSFER"
+
+export async function processSale(
+    cart: CartItem[], 
+    totalEstimado: number, 
+    paymentMethod: PaymentMethod 
+) {
   if (cart.length === 0) return { error: "El carrito está vacío" }
 
   try {
+    // Variable para guardar la venta creada y devolverla
+    let createdSaleId = ""
+    let createdDate = new Date()
+
     await prisma.$transaction(async (tx) => {
       let totalReal = 0
       const saleItemsData = []
-      
-      // Lista de turnos a marcar como cobrados (para servicios)
       const appointmentIdsToBill: string[] = []
 
       for (const item of cart) {
-        
-        // --- CASO A: PRODUCTO (Con Control de Stock) ---
+        // A. PRODUCTO
         if (item.type === 'PRODUCT') {
-            // Buscamos el producto para validar stock y precio real
             const variant = await tx.productVariant.findUnique({
                 where: { id: item.id },
                 include: { product: true }
@@ -574,7 +677,6 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
             if (!variant) throw new Error(`Producto no encontrado: ${item.description}`)
             if (variant.stock < item.quantity) throw new Error(`Stock insuficiente: ${variant.product.name}`)
 
-            // Usamos precio de DB por seguridad
             const subtotal = Number(variant.salePrice) * item.quantity
             totalReal += subtotal
 
@@ -586,13 +688,11 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
                 priceAtSale: variant.salePrice
             })
 
-            // Baja de Stock
             await tx.productVariant.update({
                 where: { id: variant.id },
                 data: { stock: { decrement: item.quantity } }
             })
 
-            // Auditoría de Movimiento
             await tx.stockMovement.create({
                 data: {
                     variantId: variant.id,
@@ -603,39 +703,40 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
                 }
             })
         } 
-        
-        // --- CASO B: SERVICIO (Sin Stock, Precio Variable) ---
+        // B. SERVICIO
         else if (item.type === 'SERVICE') {
-            // En servicios confiamos en el precio que manda el cajero
             const subtotal = item.price * item.quantity
             totalReal += subtotal
 
             saleItemsData.push({
-                variantId: null, // Es servicio, no tiene variante
+                variantId: null,
                 description: item.description,
                 quantity: item.quantity,
-                costAtSale: 0,     // Mano de obra (asumimos 0 costo directo por ahora)
+                costAtSale: 0,
                 priceAtSale: item.price
             })
 
-            // Guardamos el ID del turno para actualizarlo luego
             appointmentIdsToBill.push(item.id)
         }
       }
 
-      // 4. Crear la Venta Cabecera
-      await tx.sale.create({
+      // Crear Venta Cabecera
+      const sale = await tx.sale.create({
         data: {
           total: totalReal,
-          paymentMethod: "CASH", // Por ahora fijo efectivo
+          paymentMethod: paymentMethod, 
           status: "COMPLETED",
           items: {
             create: saleItemsData
           }
         }
       })
+      
+      // Guardamos datos para retornar
+      createdSaleId = sale.id
+      createdDate = sale.createdAt
 
-      // 5. Actualizar Turnos a BILLED (Cobrados)
+      // Actualizar Turnos
       if (appointmentIdsToBill.length > 0) {
         await tx.appointment.updateMany({
             where: { id: { in: appointmentIdsToBill } },
@@ -646,8 +747,11 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
 
     revalidatePath("/products")
     revalidatePath("/pos")
-    revalidatePath("/agenda") // Importante: para que el turno cambie de color
-    return { success: true }
+    revalidatePath("/agenda")
+    revalidatePath("/dashboard")
+    
+    // Retornamos los datos clave
+    return { success: true, saleId: createdSaleId, date: createdDate }
 
   } catch (error: any) {
     console.error("Error en venta:", error)
@@ -655,46 +759,30 @@ export async function processSale(cart: CartItem[], totalEstimado: number) {
   }
 }
 
+// --- ANULAR VENTA (Sin cambios, pero incluimos el archivo completo por la regla) ---
 export async function cancelSale(saleId: string) {
-  console.log(`🔍 [DEBUG] Iniciando anulación para Venta ID: ${saleId}`)
-  
   try {
     await prisma.$transaction(async (tx) => {
-      // 1. Buscar la venta
       const sale = await tx.sale.findUnique({
         where: { id: saleId },
-        include: { 
-          items: {
-            include: {
-              variant: {
-                include: { product: true }
-              }
-            }
-          } 
-        }
+        include: { items: { include: { variant: { include: { product: true } } } } } 
       })
 
       if (!sale) throw new Error("Venta no encontrada")
-      if (sale.status === 'CANCELLED') throw new Error("Ya está anulada")
+      if (sale.status === 'CANCELLED') throw new Error("Esta venta ya está anulada")
 
-      // 2. Marcar como ANULADA
       await tx.sale.update({
         where: { id: saleId },
         data: { status: 'CANCELLED' }
       })
 
-      // 3. Procesar items
       for (const item of sale.items) {
-        
-        // A. Si es PRODUCTO (tiene variantId)
         if (item.variantId && item.variant) {
-          // Devolver stock
           await tx.productVariant.update({
             where: { id: item.variantId },
             data: { stock: { increment: item.quantity } }
           })
 
-          // Auditar movimiento
           await tx.stockMovement.create({
             data: {
               variantId: item.variantId,
@@ -705,36 +793,29 @@ export async function cancelSale(saleId: string) {
             }
           })
 
-          // AJUSTE FINANCIERO: Si ya estaba pagado, generar deuda al dueño
           if (item.isSettled) {
             const amountOwedBack = Number(item.costAtSale) * item.quantity
-            const ownerId = item.variant.product.ownerId
-
             await tx.balanceAdjustment.create({
               data: {
-                ownerId: ownerId,
-                amount: -amountOwedBack, 
-                description: `Devolución liquidada: ${item.description}`,
+                ownerId: item.variant.product.ownerId,
+                amount: -amountOwedBack,
+                description: `Devolución Liq. - Prod: ${item.description}`,
                 isApplied: false
               }
             })
           }
         }
-        
-        // B. Si es SERVICIO (variantId null)
-        // Por ahora no hacemos nada específico más que anular la venta.
-        // Idealmente, deberíamos buscar el turno y volverlo a 'PENDING',
-        // pero eso requiere guardar el appointmentId en SaleItem, cosa que haremos en v2.
       }
     })
 
     revalidatePath("/sales")
     revalidatePath("/products") 
     revalidatePath("/owners/balance")
+    revalidatePath("/dashboard")
     return { success: true }
 
   } catch (error: any) {
-    console.error("❌ [DEBUG] Error anulando venta:", error)
+    console.error("Error anulando venta:", error)
     return { error: error.message || "Error al anular venta" }
   }
 }
@@ -751,48 +832,39 @@ import { redirect } from "next/navigation"
 export async function createSettlement(formData: FormData) {
   const ownerId = formData.get("ownerId") as string
   
-  if (!ownerId) throw new Error("ID de dueño requerido")
+  if (!ownerId) return { error: "ID de dueño requerido" }
 
   try {
-    // 1. SEGURIDAD: Recalculamos todo en el servidor.
-    
-    // A. Buscar Ventas Pendientes (Suman deuda)
+    // 1. Recalcular deuda en el servidor (Fuente de la verdad)
+    // No confiamos en lo que diga el frontend, recalculamos aquí.
     const pendingItems = await prisma.saleItem.findMany({
       where: {
         isSettled: false,
-        variant: {
-          product: { ownerId: ownerId }
-        }
+        variant: { product: { ownerId: ownerId } }
       }
     })
 
-    // B. Buscar Ajustes Pendientes (Restan deuda, generalmente)
     const pendingAdjustments = await prisma.balanceAdjustment.findMany({
-      where: {
-        ownerId: ownerId,
-        isApplied: false
-      }
+      where: { ownerId: ownerId, isApplied: false }
     })
 
-    if (pendingItems.length === 0 && pendingAdjustments.length === 0) {
-      return { error: "No hay movimientos pendientes para liquidar." }
+    // 2. Sumas
+    const debtFromSales = pendingItems.reduce((sum, item) => sum + (Number(item.costAtSale) * item.quantity), 0)
+    const debtFromAdj = pendingAdjustments.reduce((sum, adj) => sum + Number(adj.amount), 0)
+    
+    const totalToPay = debtFromSales + debtFromAdj
+
+    // 3. VALIDACIÓN DE NEGOCIO (Blindaje)
+    // Solo permitimos liquidar si efectivamente le debemos plata al dueño.
+    if (totalToPay <= 0) {
+        return { 
+            error: `No se puede liquidar. El saldo es $${totalToPay.toLocaleString()}. Solo se registran pagos cuando hay deuda a favor del dueño.` 
+        }
     }
 
-    // 2. Calcular Totales
-    const totalSales = pendingItems.reduce((sum, item) => {
-      return sum + (Number(item.costAtSale) * item.quantity)
-    }, 0)
-
-    const totalAdjustments = pendingAdjustments.reduce((sum, adj) => {
-      return sum + Number(adj.amount)
-    }, 0)
-
-    // Total Neto (Suma algebraica)
-    const totalToPay = totalSales + totalAdjustments
-
-    // 3. TRANSACCIÓN ATÓMICA
+    // 4. TRANSACCIÓN
     await prisma.$transaction(async (tx) => {
-      // A. Crear la Cabecera ("El Recibo")
+      // A. Crear Recibo
       const newSettlement = await tx.settlement.create({
         data: {
           ownerId,
@@ -804,10 +876,7 @@ export async function createSettlement(formData: FormData) {
       if (pendingItems.length > 0) {
         await tx.saleItem.updateMany({
           where: { id: { in: pendingItems.map(i => i.id) } },
-          data: {
-            isSettled: true,
-            settlementId: newSettlement.id
-          }
+          data: { isSettled: true, settlementId: newSettlement.id }
         })
       }
 
@@ -815,21 +884,27 @@ export async function createSettlement(formData: FormData) {
       if (pendingAdjustments.length > 0) {
         await tx.balanceAdjustment.updateMany({
             where: { id: { in: pendingAdjustments.map(a => a.id) } },
-            data: {
-                isApplied: true,
-                settlementId: newSettlement.id
-            }
+            data: { isApplied: true, settlementId: newSettlement.id }
         })
       }
     })
 
     revalidatePath("/owners/balance")
+    revalidatePath(`/owners/settlement/${ownerId}`)
+    revalidatePath(`/owners/${ownerId}`)
 
+    // Nota: No hacemos redirect aquí para poder retornar el objeto { success: true }
+    // El componente cliente (SettlementButton) debería manejar la navegación si lo desea,
+    // o simplemente mostrar un éxito. 
+    // Como SettlementButton es un botón simple dentro de un form action tradicional,
+    // haremos un redirect exitoso a la lista general.
+    
   } catch (error) {
     console.error("Error en liquidación:", error)
-    return { error: "Error al procesar el pago." }
+    return { error: "Error interno al procesar el pago." }
   }
 
+  // Éxito: Volvemos al balance general
   redirect("/owners/balance")
 }
 
@@ -839,7 +914,7 @@ export async function createSettlement(formData: FormData) {
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import MainNav from "@/components/MainNav"; // 👈 Importamos la barra
+import MainNav from "@/components/MainNav";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -863,16 +938,24 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="es">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-gray-50 min-h-screen`}
-      >
-        {/* 1. Barra de Navegación Fija Arriba */}
-        <MainNav />
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased bg-gray-50 min-h-screen`}>
+        
+        {/* CONTENEDOR PRINCIPAL */}
+        {/* Mobile: Columna (Contenido arriba, barra abajo) */}
+        {/* Desktop (md): Fila (Barra izquierda, contenido derecha) */}
+        <div className="flex flex-col md:flex-row min-h-screen">
+          
+          {/* 1. La Barra de Navegación (Se adapta sola por dentro) */}
+          <MainNav />
 
-        {/* 2. Contenido de la página (con un poco de margen para respirar) */}
-        <main>
-          {children}
-        </main>
+          {/* 2. El Área de Contenido */}
+          {/* flex-1: Ocupa todo el espacio restante */}
+          {/* pb-20: Padding abajo para que en móvil la barra no tape el final de la página */}
+          <main className="flex-1 pb-24 md:pb-0 md:px-0">
+            {children}
+          </main>
+
+        </div>
       </body>
     </html>
   );
@@ -951,9 +1034,9 @@ export default function Home() {
 
 // src/app/agenda/page.tsx
 import { prisma } from "@/lib/prisma"
-import { cancelAppointment } from "@/actions/appointment-actions"
 import Link from "next/link"
 import AppointmentForm from "@/components/AppointmentForm"
+import AppointmentCard from "@/components/AppointmentCard" // 👈 Importamos
 
 interface Props {
   searchParams: Promise<{ date?: string }>
@@ -966,17 +1049,17 @@ export default async function AgendaPage({ searchParams }: Props) {
   const todayStr = new Date().toISOString().split('T')[0]
   const selectedDateStr = date || todayStr
 
-  // Rango de búsqueda: Todo el día seleccionado
+  // Rangos de búsqueda (Local Day)
   const startOfDay = new Date(`${selectedDateStr}T00:00:00`)
   const endOfDay = new Date(`${selectedDateStr}T23:59:59`)
 
-  // 1. Buscar Mascotas (Para el selector de nuevo turno)
+  // 1. Datos para el Formulario
   const pets = await prisma.pet.findMany({ 
     orderBy: { name: 'asc' },
     select: { id: true, name: true, breed: true }
   })
 
-  // 2. Buscar Turnos del día
+  // 2. Datos de Turnos
   const appointments = await prisma.appointment.findMany({
     where: {
       startTime: { gte: startOfDay, lte: endOfDay },
@@ -987,116 +1070,66 @@ export default async function AgendaPage({ searchParams }: Props) {
   })
 
   return (
-    <div className="p-8 max-w-7xl mx-auto">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-3xl font-bold text-gray-800">Agenda de Turnos</h1>
-        
-        {/* Navegación rápida */}
-        <div className="space-x-4 text-blue-600 font-bold text-sm">
-            <Link href="/dashboard" className="hover:underline">Dashboard</Link>
-            <Link href="/pets" className="hover:underline">Mascotas</Link>
+    <div className="p-6 max-w-7xl mx-auto">
+      
+      {/* HEADER */}
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+        <div>
+            <h1 className="text-3xl font-bold text-gray-800">Agenda de Turnos</h1>
+            <p className="text-gray-500 text-sm">Organiza el flujo de trabajo diario.</p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
 
-        {/* COLUMNA IZQUIERDA: LISTADO DE TURNOS */}
+        {/* COLUMNA IZQUIERDA: LISTADO (2/3 de ancho) */}
         <div className="lg:col-span-2 space-y-4">
             
-            {/* Selector de Fecha */}
-            <div className="bg-white p-4 rounded-lg shadow border flex items-center gap-4">
-                <label className="font-bold text-gray-700">Fecha:</label>
-                <form className="flex gap-2">
-                    <input 
-                        type="date" 
-                        name="date" 
-                        defaultValue={selectedDateStr} 
-                        className="border p-2 rounded"
-                    />
-                    <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded font-bold text-sm hover:bg-blue-700">
-                        Ir
-                    </button>
-                </form>
+            {/* Barra de Fecha */}
+            <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200 flex flex-wrap items-center gap-4 justify-between">
+                <div className="flex items-center gap-2">
+                    <span className="text-xl">📅</span>
+                    <form className="flex gap-2 items-center">
+                        <input 
+                            type="date" 
+                            name="date" 
+                            defaultValue={selectedDateStr} 
+                            className="border p-2 rounded text-gray-700 font-medium focus:ring-2 focus:ring-blue-500 outline-none"
+                        />
+                        <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded font-bold text-sm hover:bg-blue-700">
+                            Ir
+                        </button>
+                    </form>
+                </div>
                 
                 {selectedDateStr !== todayStr && (
-                     <Link href="/agenda" className="text-sm text-gray-500 underline ml-auto">Volver a Hoy</Link>
+                     <Link href="/agenda" className="text-sm font-bold text-blue-600 hover:underline">
+                        Volver a Hoy
+                     </Link>
                 )}
             </div>
 
             {/* Grilla de Turnos */}
-            <div className="bg-white rounded-lg shadow border overflow-hidden min-h-[300px]">
+            <div className="space-y-3 min-h-[300px]">
                 {appointments.length === 0 ? (
-                    <div className="h-full flex flex-col items-center justify-center text-gray-400 py-20">
-                        <span className="text-4xl mb-2">📅</span>
-                        <p>Agenda libre.</p>
+                    <div className="flex flex-col items-center justify-center text-gray-400 py-20 bg-gray-50 rounded-lg border border-dashed">
+                        <span className="text-4xl mb-2 opacity-50">😴</span>
+                        <p>No hay turnos para esta fecha.</p>
                     </div>
                 ) : (
-                    <div className="divide-y">
-                        {appointments.map(appt => {
-                            const start = appt.startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                            const end = appt.endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                            
-                            return (
-                                <div key={appt.id} className="p-4 flex flex-col sm:flex-row justify-between items-center hover:bg-gray-50">
-                                    {/* Info del Turno */}
-                                    <div className="flex items-center gap-4">
-                                        <div className={`
-                                            px-3 py-2 rounded text-lg font-bold font-mono border 
-                                            ${appt.status === 'BILLED' 
-                                                ? 'bg-gray-100 text-gray-500 border-gray-200' 
-                                                : 'bg-blue-100 text-blue-800 border-blue-200'}
-                                        `}>
-                                            {start}
-                                        </div>
-                                        <div>
-                                            <p className="font-bold text-lg text-gray-800">{appt.pet.name}</p>
-                                            <p className="text-xs text-gray-500">
-                                                Finaliza: {end} | Dueño: {appt.pet.ownerName}
-                                            </p>
-                                        </div>
-                                    </div>
-
-                                    {/* Botonera de Acciones */}
-                                    <div className="mt-4 sm:mt-0 flex gap-2 items-center">
-                                        
-                                        {/* BOTÓN COBRAR: Solo aparece si está pendiente */}
-                                        {appt.status === 'PENDING' && (
-                                            <Link
-                                                href={`/pos?apptId=${appt.id}&petName=${encodeURIComponent(appt.pet.name)}`}
-                                                className="bg-green-600 text-white text-xs font-bold px-3 py-1.5 rounded hover:bg-green-700 shadow-sm flex items-center gap-1 transition"
-                                            >
-                                                <span>💰</span> COBRAR
-                                            </Link>
-                                        )}
-
-                                        {/* Etiqueta de Cobrado */}
-                                        {appt.status === 'BILLED' && (
-                                            <span className="text-xs bg-gray-100 text-gray-500 border border-gray-200 px-3 py-1 rounded cursor-not-allowed font-medium">
-                                                ✅ Cobrado
-                                            </span>
-                                        )}
-
-                                        {/* Botón Cancelar */}
-                                        {appt.status === 'PENDING' && (
-                                            <form action={cancelAppointment}>
-                                                <input type="hidden" name="id" value={appt.id} />
-                                                <button className="text-red-500 text-xs font-bold border border-red-200 px-3 py-1 rounded hover:bg-red-50 hover:text-red-700 transition ml-2">
-                                                    CANCELAR
-                                                </button>
-                                            </form>
-                                        )}
-                                    </div>
-                                </div>
-                            )
-                        })}
-                    </div>
+                    // Renderizamos cada turno usando el componente nuevo
+                    appointments.map(appt => (
+                        <AppointmentCard key={appt.id} appt={appt} />
+                    ))
                 )}
             </div>
         </div>
 
-        {/* COLUMNA DERECHA: FORMULARIO CLIENTE */}
+        {/* COLUMNA DERECHA: FORMULARIO (1/3 de ancho) */}
         <div className="lg:col-span-1">
-            <AppointmentForm pets={pets} selectedDate={selectedDateStr} />
+            <div className="sticky top-6">
+                <AppointmentForm pets={pets} selectedDate={selectedDateStr} />
+            </div>
         </div>
 
       </div>
@@ -1161,17 +1194,16 @@ import { getLocalDateISO } from "@/lib/utils"
 export default async function DashboardPage() {
   const now = new Date()
   
-  // Rango Mes (Estándar)
   const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
   const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1)
 
-  // Rango Hoy (Ajustado a Argentina)
   const todayStr = getLocalDateISO() 
-  // Al agregar T00:00:00, forzamos al servidor a tratarlo como el inicio del día local
   const startOfToday = new Date(`${todayStr}T00:00:00`)
   const endOfToday = new Date(`${todayStr}T23:59:59`)
 
+  // Consultas Paralelas
   const [monthSales, todaySales, todayAppointments, lowStockVariants] = await Promise.all([
+    // Ventas Mes
     prisma.sale.findMany({
       where: {
         status: "COMPLETED",
@@ -1179,12 +1211,14 @@ export default async function DashboardPage() {
       },
       include: { items: true }
     }),
+    // Ventas Hoy (Necesitamos saber el paymentMethod)
     prisma.sale.findMany({
       where: {
         status: "COMPLETED",
         createdAt: { gte: startOfToday, lte: endOfToday }
       }
     }),
+    // Turnos Hoy
     prisma.appointment.findMany({
       where: {
         startTime: { gte: startOfToday, lte: endOfToday },
@@ -1193,6 +1227,7 @@ export default async function DashboardPage() {
       include: { pet: true },
       orderBy: { startTime: 'asc' }
     }),
+    // Stock Bajo
     prisma.productVariant.findMany({
       where: { stock: { lte: 3 } },
       include: { product: true },
@@ -1201,7 +1236,7 @@ export default async function DashboardPage() {
     })
   ])
 
-  // Cálculos
+  // Cálculos Mensuales
   let monthRevenue = 0
   let monthCost = 0
   monthSales.forEach(sale => {
@@ -1210,36 +1245,68 @@ export default async function DashboardPage() {
   })
   const monthProfit = monthRevenue - monthCost
   const monthMargin = monthRevenue > 0 ? (monthProfit / monthRevenue) * 100 : 0
-  const todayRevenue = todaySales.reduce((sum, sale) => sum + Number(sale.total), 0)
-  const todayTransactions = todaySales.length
+
+  // Cálculos Diarios (Desglose por Medio de Pago)
+  const todayStats = {
+    total: 0,
+    cash: 0,
+    digital: 0, // Transfer + Tarjetas
+    transactions: todaySales.length
+  }
+
+  todaySales.forEach(sale => {
+    const amount = Number(sale.total)
+    todayStats.total += amount
+    if (sale.paymentMethod === 'CASH') {
+        todayStats.cash += amount
+    } else {
+        todayStats.digital += amount
+    }
+  })
 
   return (
     <div className="p-8 max-w-7xl mx-auto">
       <h1 className="text-3xl font-bold text-gray-800 mb-2">Tablero de Control</h1>
       
-      {/* 👇 AQUÍ ESTABA EL ERROR VISUAL: Ahora usamos startOfToday que es inequívocamente hoy */}
       <p className="text-gray-500 mb-8 capitalize">
-        Visión general del negocio hoy, {startOfToday.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' })}.
+        Resumen del {startOfToday.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' })}.
       </p>
 
-      {/* SECCIÓN 1: CAJA DEL DÍA */}
+      {/* SECCIÓN 1: CAJA DEL DÍA DETALLADA */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
-        <div className="bg-gradient-to-br from-green-600 to-green-700 text-white p-6 rounded-lg shadow-lg transform hover:scale-105 transition">
-            <p className="text-green-100 text-sm font-bold uppercase tracking-wider">Caja de Hoy</p>
-            <p className="text-4xl font-bold mt-2">${todayRevenue.toLocaleString()}</p>
-            <p className="text-sm opacity-80 mt-1">{todayTransactions} ventas registradas</p>
+        
+        {/* Caja de Hoy (Principal) */}
+        <div className="bg-slate-900 text-white p-6 rounded-lg shadow-lg relative overflow-hidden">
+            <div className="relative z-10">
+                <p className="text-slate-400 text-sm font-bold uppercase tracking-wider">Ventas de Hoy</p>
+                <p className="text-4xl font-bold mt-2">${todayStats.total.toLocaleString()}</p>
+                <div className="mt-4 flex gap-4 text-sm">
+                    <div>
+                        <span className="block text-green-400 font-bold">💵 ${todayStats.cash.toLocaleString()}</span>
+                        <span className="text-slate-500 text-xs">Efectivo</span>
+                    </div>
+                    <div className="border-l border-slate-700 pl-4">
+                        <span className="block text-blue-400 font-bold">💳 ${todayStats.digital.toLocaleString()}</span>
+                        <span className="text-slate-500 text-xs">Digital</span>
+                    </div>
+                </div>
+            </div>
         </div>
+
+        {/* Acumulado Mes */}
         <div className="bg-white p-6 rounded-lg shadow border-l-4 border-blue-600">
-            <p className="text-gray-500 text-sm font-bold uppercase">Acumulado Mes</p>
+            <p className="text-gray-500 text-sm font-bold uppercase">Facturación Mes</p>
             <p className="text-3xl font-bold text-gray-800 mt-2">${monthRevenue.toLocaleString()}</p>
             <p className="text-xs text-gray-400 mt-1">
-                Ganancia Neta: <span className="text-green-600 font-bold">${monthProfit.toLocaleString()}</span>
+                Ganancia Estimada: <span className="text-green-600 font-bold">${monthProfit.toLocaleString()}</span>
             </p>
         </div>
+
+        {/* Rentabilidad */}
         <div className="bg-white p-6 rounded-lg shadow border-l-4 border-purple-600">
-            <p className="text-gray-500 text-sm font-bold uppercase">Rentabilidad</p>
+            <p className="text-gray-500 text-sm font-bold uppercase">Margen Promedio</p>
             <p className="text-3xl font-bold text-gray-800 mt-2">{monthMargin.toFixed(1)}%</p>
-            <p className="text-xs text-gray-400 mt-1">Margen promedio sobre ventas</p>
+            <p className="text-xs text-gray-400 mt-1">Sobre ventas totales</p>
         </div>
       </div>
 
@@ -1314,83 +1381,37 @@ export default async function DashboardPage() {
 
 // src/app/inventory/page.tsx
 import { prisma } from "@/lib/prisma"
-// Importamos la nueva función (asegurate de cambiar el nombre en el import también si lo cambiaste en el archivo)
-import { registerStockMovement } from "@/actions/inventory-actions"
+import StockMovementForm from "@/components/StockMovementForm"
+import Link from "next/link"
 
 export default async function InventoryPage() {
+  // Buscamos datos para el selector
   const products = await prisma.product.findMany({
+    where: { isActive: true }, // Solo productos activos
     include: { variants: true, owner: true },
     orderBy: { name: 'asc' }
   })
 
+  // Mapeamos a una estructura simple para pasar al Client Component
+  const productOptions = products.map(p => ({
+    variantId: p.variants[0].id,
+    productName: p.name,
+    ownerName: p.owner.name,
+    stock: p.variants[0].stock
+  }))
+
   return (
     <div className="p-8 max-w-2xl mx-auto">
-      <h1 className="text-3xl font-bold mb-8">Control de Stock</h1>
+      <div className="flex justify-between items-center mb-8">
+        <h1 className="text-3xl font-bold">Control de Stock</h1>
+        <Link href="/products" className="text-blue-600 hover:underline text-sm font-bold">
+            ← Volver a Lista
+        </Link>
+      </div>
 
       <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200">
-        {/* Cambiamos la acción a la nueva función */}
-        <form action={registerStockMovement} className="space-y-6">
-          
-          {/* NUEVO: TIPO DE MOVIMIENTO */}
-          <div className="flex gap-4 p-4 bg-gray-50 rounded border">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="radio" name="type" value="ENTRY" defaultChecked className="w-5 h-5 text-green-600" />
-              <span className="font-bold text-green-700">🟢 Ingreso (Remito)</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="radio" name="type" value="OWNER_WITHDRAWAL" className="w-5 h-5 text-orange-600" />
-              <span className="font-bold text-orange-700">🟠 Retiro de Dueño</span>
-            </label>
-          </div>
-
-          {/* SELECCIÓN DE PRODUCTO */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Producto</label>
-            <select name="variantId" required className="w-full border p-3 rounded bg-white">
-              <option value="">Seleccionar producto...</option>
-              {products.map(p => {
-                const v = p.variants[0]
-                return (
-                  <option key={v.id} value={v.id}>
-                    {p.name} (Stock: {v.stock}) - Dueño: {p.owner.name}
-                  </option>
-                )
-              })}
-            </select>
-          </div>
-
-          {/* CANTIDAD */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Cantidad</label>
-            <input 
-              name="quantity" 
-              type="number" 
-              min="1" 
-              required 
-              className="w-full border p-3 rounded text-lg font-bold" 
-              placeholder="Ej: 5"
-            />
-          </div>
-
-          {/* MOTIVO */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Nota / Motivo</label>
-            <input 
-              name="reason" 
-              type="text" 
-              className="w-full border p-3 rounded" 
-              placeholder="Ej: Remito #123 o 'Se lo llevó para evento'"
-            />
-          </div>
-
-          <button 
-            type="submit" 
-            className="w-full bg-slate-800 text-white py-3 rounded hover:bg-slate-900 font-bold text-lg"
-          >
-            Registrar Movimiento
-          </button>
-
-        </form>
+        {/* Renderizamos el formulario interactivo */}
+        <StockMovementForm products={productOptions} />
       </div>
     </div>
   )
@@ -1400,37 +1421,63 @@ export default async function InventoryPage() {
 
 // src/app/owners/page.tsx
 import { prisma } from "@/lib/prisma"
-import OwnerForm from "@/components/OwnerForm" // 👈 Usamos el componente nuevo
+import OwnerForm from "@/components/OwnerForm" 
+import SearchInput from "@/components/SearchInput" 
 import Link from "next/link"
 
-export default async function OwnersPage() {
+interface Props {
+  searchParams?: Promise<{ query?: string }>
+}
+
+export default async function OwnersPage({ searchParams }: Props) {
+  const params = await searchParams
+  const query = params?.query || ""
+
   const owners = await prisma.owner.findMany({
+    where: query ? {
+        OR: [
+            { name: { contains: query, mode: 'insensitive' } },
+            { email: { contains: query, mode: 'insensitive' } },
+            { phone: { contains: query, mode: 'insensitive' } }
+        ]
+    } : undefined,
     orderBy: { createdAt: 'desc' }
   })
 
   return (
     <div className="p-10 max-w-6xl mx-auto">
       <div className="flex justify-between items-center mb-8">
-        <h1 className="text-3xl font-bold">Gestión de Dueños</h1>
+        <h1 className="text-3xl font-bold text-gray-800">Gestión de Dueños</h1>
+      </div>
+
+      <div className="mb-8 max-w-md">
+        <SearchInput placeholder="Buscar por nombre, mail o teléfono..." />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
         
         {/* COLUMNA IZQUIERDA: FORMULARIO ALTA */}
         <div className="md:col-span-1">
-            <div className="sticky top-24">
-                <OwnerForm /> {/* 👈 Formulario limpio, sin props es creación */}
+            <div className="sticky top-6">
+                <OwnerForm /> 
             </div>
         </div>
 
         {/* COLUMNA DERECHA: LISTADO */}
         <div className="md:col-span-2 grid gap-4">
             {owners.map((owner) => (
-            <div key={owner.id} className="border p-4 rounded-lg bg-white shadow-sm hover:shadow-md transition flex justify-between items-center">
-                <div>
+            <div key={owner.id} className="border p-4 rounded-lg bg-white shadow-sm hover:shadow-md transition flex justify-between items-center group">
+                {/* Click en toda el área (excepto botones) lleva al perfil */}
+                <Link href={`/owners/${owner.id}`} className="flex-1 cursor-pointer">
                     <div className="flex items-center gap-2">
-                        <p className="font-bold text-lg text-gray-800">{owner.name}</p>
-                        {owner.isActive && <span className="w-2 h-2 rounded-full bg-green-500"></span>}
+                        <p className="font-bold text-lg text-gray-800 group-hover:text-blue-600 transition">
+                            {owner.name}
+                        </p>
+                        {owner.isActive ? (
+                            <span className="w-2 h-2 rounded-full bg-green-500" title="Activo"></span>
+                        ) : (
+                            <span className="w-2 h-2 rounded-full bg-red-500" title="Inactivo"></span>
+                        )}
                     </div>
                     <p className="text-gray-500 text-sm mt-1">
                         📧 {owner.email || "Sin email"}
@@ -1438,21 +1485,23 @@ export default async function OwnersPage() {
                     <p className="text-gray-500 text-sm">
                         📞 {owner.phone || "Sin teléfono"}
                     </p>
-                </div>
-                
-                {/* BOTÓN EDITAR */}
-                <Link 
-                    href={`/owners/${owner.id}/edit`}
-                    className="bg-gray-100 text-gray-600 hover:bg-blue-50 hover:text-blue-600 px-4 py-2 rounded text-sm font-bold border transition"
-                >
-                    EDITAR
                 </Link>
+                
+                {/* BOTÓN PERFIL */}
+                <div className="flex gap-2">
+                    <Link 
+                        href={`/owners/${owner.id}`}
+                        className="bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold shadow hover:bg-black transition"
+                    >
+                        PERFIL
+                    </Link>
+                </div>
             </div>
             ))}
             
             {owners.length === 0 && (
-            <div className="p-10 text-center text-gray-400 border-2 border-dashed rounded-lg">
-                No hay dueños registrados.
+            <div className="p-10 text-center text-gray-400 border-2 border-dashed rounded-lg bg-gray-50">
+                {query ? "No se encontraron dueños." : "No hay dueños registrados."}
             </div>
             )}
         </div>
@@ -1799,6 +1848,189 @@ export default async function SettlementPage({ params }: Props) {
   )
 }
 
+--- File: page.tsx (in subfolder: app\owners\[id]) ---
+
+// src/app/owners/[id]/page.tsx
+import { prisma } from "@/lib/prisma"
+import Link from "next/link"
+import { notFound } from "next/navigation"
+
+interface Props {
+  params: Promise<{ id: string }>
+}
+
+export default async function OwnerProfilePage({ params }: Props) {
+  const { id } = await params
+
+  // 1. Buscamos TODOS los datos del dueño
+  const owner = await prisma.owner.findUnique({
+    where: { id },
+    include: {
+      // A. Sus productos y stock actual
+      products: {
+        where: { isActive: true },
+        include: { variants: true }
+      },
+      // B. Historial de Pagos (Liquidaciones pasadas)
+      settlements: {
+        orderBy: { createdAt: 'desc' },
+        take: 20 // Últimos 20 pagos
+      },
+      // C. Deuda Pendiente (Cálculo en vivo)
+      balanceAdjustments: { where: { isApplied: false } }
+    }
+  })
+
+  if (!owner) return notFound()
+
+  // 2. CÁLCULOS EN MEMORIA
+  
+  // A. Inventario en consignación (Stock > 0)
+  const activeInventory = owner.products.flatMap(p => 
+    p.variants.filter(v => v.stock > 0).map(v => ({
+      name: p.name, // Variante podría tener nombre propio si quisieras
+      price: v.salePrice,
+      cost: v.costPrice,
+      stock: v.stock,
+      image: v.imageUrl
+    }))
+  )
+
+  // B. Calcular Deuda Pendiente (Similar a la página de Balance)
+  // Necesitamos buscar los items vendidos NO pagados. 
+  // Nota: Hacemos esta query aparte para no traer TODAS las ventas históricas en el include principal.
+  const pendingItems = await prisma.saleItem.findMany({
+    where: {
+      isSettled: false,
+      variant: { product: { ownerId: id } }
+    }
+  })
+
+  const debtFromSales = pendingItems.reduce((sum, item) => sum + (Number(item.costAtSale) * item.quantity), 0)
+  const debtFromAdj = owner.balanceAdjustments.reduce((sum, adj) => sum + Number(adj.amount), 0)
+  const totalDebt = debtFromSales + debtFromAdj
+
+  return (
+    <div className="p-8 max-w-6xl mx-auto">
+      
+      {/* HEADER / TARJETA DE PERFIL */}
+      <div className="flex flex-col md:flex-row justify-between items-start gap-6 mb-8">
+        <div>
+            <Link href="/owners" className="text-sm text-blue-600 hover:underline mb-2 block">← Volver al listado</Link>
+            <h1 className="text-4xl font-bold text-gray-800 flex items-center gap-3">
+                {owner.name}
+                {!owner.isActive && <span className="text-sm bg-red-100 text-red-600 px-2 py-1 rounded">INACTIVO</span>}
+            </h1>
+            <div className="mt-2 text-gray-600 space-y-1">
+                <p>📧 {owner.email || "Sin email"}</p>
+                <p>📞 {owner.phone || "Sin teléfono"}</p>
+            </div>
+            <div className="mt-4">
+                <Link 
+                    href={`/owners/${owner.id}/edit`}
+                    className="text-xs font-bold bg-gray-100 text-gray-600 px-3 py-1.5 rounded border hover:bg-gray-200"
+                >
+                    ✏️ EDITAR DATOS
+                </Link>
+            </div>
+        </div>
+
+        {/* CAJA DE ESTADO DE CUENTA */}
+        <div className={`p-6 rounded-lg shadow-lg border text-white min-w-[300px]
+            ${totalDebt > 0 ? 'bg-slate-800' : 'bg-green-600'}
+        `}>
+            <p className="text-xs font-bold uppercase opacity-80 mb-1">Saldo Pendiente</p>
+            <p className="text-4xl font-bold mb-4">${totalDebt.toLocaleString()}</p>
+            
+            {totalDebt !== 0 ? (
+                <Link 
+                    href={`/owners/settlement/${owner.id}`}
+                    className="block text-center bg-white text-gray-900 font-bold py-2 rounded shadow hover:bg-gray-100 transition"
+                >
+                    {totalDebt > 0 ? "💸 LIQUIDAR (PAGAR)" : "⚖️ AJUSTAR SALDO"}
+                </Link>
+            ) : (
+                <div className="flex items-center gap-2 text-sm font-bold bg-white/20 p-2 rounded">
+                    <span>✅</span> Todo al día
+                </div>
+            )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        
+        {/* COLUMNA IZQUIERDA: INVENTARIO ACTUAL */}
+        <div className="bg-white rounded-lg shadow border overflow-hidden">
+            <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
+                <h2 className="font-bold text-lg text-gray-800">📦 En Stock ({activeInventory.length})</h2>
+                <span className="text-xs text-gray-500">Mercadería en el local</span>
+            </div>
+            
+            <div className="max-h-[400px] overflow-y-auto divide-y">
+                {activeInventory.length === 0 ? (
+                    <div className="p-8 text-center text-gray-400">Este dueño no tiene productos activos.</div>
+                ) : (
+                    activeInventory.map((item, idx) => (
+                        <div key={idx} className="p-3 flex justify-between items-center hover:bg-gray-50">
+                            <div className="flex items-center gap-3">
+                                {item.image ? (
+                                    <img src={item.image} className="w-10 h-10 rounded object-cover border" />
+                                ) : (
+                                    <div className="w-10 h-10 bg-gray-200 rounded flex items-center justify-center text-[8px]">FOTO</div>
+                                )}
+                                <div>
+                                    <p className="font-bold text-sm text-gray-800">{item.name}</p>
+                                    <p className="text-xs text-gray-500">Stock: {item.stock} u.</p>
+                                </div>
+                            </div>
+                            <div className="text-right">
+                                <p className="font-bold text-gray-800 text-sm">${item.price}</p>
+                                <p className="text-[10px] text-green-600">Costo: ${item.cost}</p>
+                            </div>
+                        </div>
+                    ))
+                )}
+            </div>
+        </div>
+
+        {/* COLUMNA DERECHA: HISTORIAL DE PAGOS */}
+        <div className="bg-white rounded-lg shadow border overflow-hidden">
+            <div className="p-4 border-b bg-gray-50">
+                <h2 className="font-bold text-lg text-gray-800">📜 Historial de Pagos</h2>
+            </div>
+            
+            <div className="max-h-[400px] overflow-y-auto divide-y">
+                {owner.settlements.length === 0 ? (
+                    <div className="p-8 text-center text-gray-400">Nunca se le ha pagado.</div>
+                ) : (
+                    owner.settlements.map(settlement => (
+                        <div key={settlement.id} className="p-4 flex justify-between items-center hover:bg-gray-50">
+                            <div>
+                                <p className="font-bold text-gray-800">
+                                    {settlement.createdAt.toLocaleDateString()}
+                                </p>
+                                <p className="text-xs text-gray-400 font-mono">
+                                    ID: {settlement.id.slice(0, 8)}...
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <span className="text-lg font-bold text-green-700">
+                                    ${Number(settlement.totalAmount).toLocaleString()}
+                                </span>
+                                {/* Futuro: Link al detalle del recibo */}
+                                {/* <Link href={`/settlements/${settlement.id}`} className="...">📄</Link> */}
+                            </div>
+                        </div>
+                    ))
+                )}
+            </div>
+        </div>
+
+      </div>
+    </div>
+  )
+}
+
 --- File: page.tsx (in subfolder: app\owners\[id]\edit) ---
 
 // src/app/owners/[id]/edit/page.tsx
@@ -1835,14 +2067,29 @@ export default async function EditOwnerPage({ params }: Props) {
 import { prisma } from "@/lib/prisma"
 import { createPet, deletePet } from "@/actions/pet-actions"
 import Link from "next/link"
+import SearchInput from "@/components/SearchInput" // 👈 Importamos
 
-export default async function PetsPage() {
-  // Listamos todas las mascotas ordenadas por nombre
+interface Props {
+  searchParams?: Promise<{ query?: string }>
+}
+
+export default async function PetsPage({ searchParams }: Props) {
+  const params = await searchParams
+  const query = params?.query || ""
+
+  // FILTRO
   const pets = await prisma.pet.findMany({
+    where: query ? {
+        OR: [
+            { name: { contains: query, mode: 'insensitive' } },
+            { ownerName: { contains: query, mode: 'insensitive' } },
+            { breed: { contains: query, mode: 'insensitive' } }
+        ]
+    } : undefined,
     orderBy: { name: 'asc' }
   })
 
-  // Server Action pequeña para el botón de borrar
+  // Action para borrar (inline por simplicidad)
   async function handleDelete(formData: FormData) {
     'use server'
     const id = formData.get("id") as string
@@ -1851,53 +2098,45 @@ export default async function PetsPage() {
 
   return (
     <div className="p-8 max-w-6xl mx-auto">
-      <div className="flex justify-between items-center mb-8">
+      <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
         <h1 className="text-3xl font-bold text-gray-800">Clientes (Mascotas)</h1>
-        {/* Un pequeño menú de navegación temporal */}
-        <div className="space-x-4 text-sm font-bold text-blue-600">
-             <Link href="/dashboard" className="hover:underline">Dashboard</Link>
-             <Link href="/agenda" className="hover:underline">Agenda</Link>
-             <Link href="/products" className="hover:underline">Productos</Link>
-        </div>
+      </div>
+
+      {/* BUSCADOR */}
+      <div className="mb-8 max-w-md">
+         <SearchInput placeholder="Buscar por mascota, dueño o raza..." />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         
-        {/* COLUMNA IZQUIERDA: FORMULARIO DE ALTA */}
+        {/* COLUMNA IZQUIERDA: FORMULARIO */}
         <div className="lg:col-span-1">
-          <div className="bg-white p-6 rounded-lg shadow border sticky top-4">
+          <div className="bg-white p-6 rounded-lg shadow border sticky top-24">
             <h2 className="text-xl font-bold mb-4">Nueva Ficha</h2>
             <form action={createPet} className="space-y-4">
-              
               <div>
                 <label className="block text-sm font-medium text-gray-700">Nombre Mascota *</label>
                 <input name="name" type="text" required placeholder="Ej: Bobby" className="w-full border p-2 rounded"/>
               </div>
-
               <div>
                 <label className="block text-sm font-medium text-gray-700">Raza</label>
                 <input name="breed" type="text" placeholder="Ej: Caniche" className="w-full border p-2 rounded"/>
               </div>
-
               <div className="pt-2 border-t">
                 <p className="text-xs text-gray-400 mb-2 uppercase font-bold">Datos del Dueño</p>
-                
                 <div className="mb-2">
                     <label className="block text-sm font-medium text-gray-700">Nombre Humano *</label>
                     <input name="ownerName" type="text" required placeholder="Ej: Maria Perez" className="w-full border p-2 rounded"/>
                 </div>
-
                 <div>
                     <label className="block text-sm font-medium text-gray-700">Teléfono / WhatsApp *</label>
                     <input name="ownerPhone" type="text" required placeholder="Ej: 11 1234 5678" className="w-full border p-2 rounded"/>
                 </div>
               </div>
-
               <div>
-                <label className="block text-sm font-medium text-gray-700">Notas Generales (Alertas)</label>
+                <label className="block text-sm font-medium text-gray-700">Notas Generales</label>
                 <textarea name="notes" rows={2} className="w-full border p-2 rounded" placeholder="Ej: Alérgico al pollo"></textarea>
               </div>
-
               <button type="submit" className="w-full bg-purple-600 text-white py-3 rounded hover:bg-purple-700 font-bold">
                 Guardar Ficha
               </button>
@@ -1915,29 +2154,21 @@ export default async function PetsPage() {
                     <h3 className="text-lg font-bold text-gray-800">{pet.name}</h3>
                     <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded-full">{pet.breed}</span>
                   </div>
-                  
                   <div className="mt-1 text-sm text-gray-600">
                     <span className="font-semibold">Dueño:</span> {pet.ownerName} 
                     <span className="mx-2 text-gray-300">|</span>
                     <span className="text-green-600 font-mono">📞 {pet.ownerPhone}</span>
                   </div>
-
                   {pet.notes && (
                     <p className="mt-2 text-xs text-gray-500 italic bg-yellow-50 p-2 rounded border border-yellow-100 inline-block">
                       ⚠️ {pet.notes}
                     </p>
                   )}
                 </div>
-                
                 <div className="flex flex-col gap-2 items-end">
-                    {/* BOTÓN VER FICHA (NUEVO) */}
-                    <Link 
-                        href={`/pets/${pet.id}`}
-                        className="bg-purple-100 text-purple-700 text-xs font-bold px-3 py-1.5 rounded hover:bg-purple-200 border border-purple-200"
-                    >
+                    <Link href={`/pets/${pet.id}`} className="bg-purple-100 text-purple-700 text-xs font-bold px-3 py-1.5 rounded hover:bg-purple-200 border border-purple-200">
                         VER FICHA
                     </Link>
-
                     <form action={handleDelete}>
                         <input type="hidden" name="id" value={pet.id} />
                         <button type="submit" className="text-red-300 hover:text-red-500 text-[10px] font-bold px-2 py-1 hover:underline">
@@ -1950,7 +2181,7 @@ export default async function PetsPage() {
 
             {pets.length === 0 && (
               <div className="text-center py-10 text-gray-400 bg-gray-50 rounded border border-dashed">
-                No hay mascotas registradas.<br/>Usá el formulario de la izquierda.
+                {query ? "No encontré mascotas con ese nombre." : "No hay mascotas registradas."}
               </div>
             )}
           </div>
@@ -2124,30 +2355,39 @@ import { prisma } from "@/lib/prisma"
 import PosSystem from "@/components/PosSystem"
 
 export default async function PosPage() {
-  // Buscamos productos con stock > 0 (o todos, para mostrar agotados visualmente)
+  // Buscamos productos activos
   const products = await prisma.product.findMany({
     where: { isActive: true },
-    include: { variants: true, owner: true }
+    include: { 
+        variants: true, 
+        owner: true,
+        category: true // 👈 Agregamos esto
+    }
   })
 
-  // Transformamos los datos complejos de Prisma a una estructura simple para el Frontend
+  // Transformamos los datos para el Frontend
   const simpleProducts = products.map(p => {
     const v = p.variants[0] // Asumimos variante única
     return {
       id: v.id,
       name: p.name,
-      price: Number(v.salePrice), // Convertimos Decimal a Number para JS
+      price: Number(v.salePrice),
       stock: v.stock,
       imageUrl: v.imageUrl,
-      ownerName: p.owner.name
+      ownerName: p.owner.name,
+      categoryName: p.category.name // 👈 Dato clave para el filtro
     }
   })
 
   return (
     <div className="h-screen flex flex-col p-4 bg-gray-50">
       <header className="mb-4 flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-800">Punto de Venta</h1>
-        <div className="text-sm text-gray-500">Caja Principal</div>
+        <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+            🛒 Punto de Venta
+        </h1>
+        <div className="text-sm font-bold bg-white px-3 py-1 rounded border shadow-sm text-gray-500">
+            Caja Principal
+        </div>
       </header>
       
       {/* Cargamos el sistema interactivo */}
@@ -2161,16 +2401,36 @@ export default async function PosPage() {
 // src/app/products/page.tsx
 import { prisma } from "@/lib/prisma"
 import ProductForm from "@/components/ProductForm"
-import ProductActions from "@/components/ProductActions" // 👈 El componente nuevo
+import ProductActions from "@/components/ProductActions"
+import SearchInput from "@/components/SearchInput" // 👈 Importamos
 import Link from "next/link"
 
-export default async function ProductsPage() {
-  // 1. Datos necesarios para los selectores del formulario
+// Definimos que esta página recibe parámetros de búsqueda
+interface Props {
+  searchParams?: Promise<{
+    query?: string
+    page?: string
+  }>
+}
+
+export default async function ProductsPage({ searchParams }: Props) {
+  // Esperamos los parámetros (Next.js 15 requiere await, versiones anteriores no, pero es buena práctica)
+  const params = await searchParams
+  const query = params?.query || ""
+
+  // 1. Datos para selectores (Formulario)
   const owners = await prisma.owner.findMany({ select: { id: true, name: true } })
   const categories = await prisma.category.findMany({ select: { id: true, name: true } })
 
-  // 2. Listado de productos (Traemos TODO para gestionar el inventario)
+  // 2. FILTRO DINÁMICO
+  // Si hay query, filtramos. Si no, traemos todo.
   const products = await prisma.product.findMany({
+    where: query ? {
+        OR: [
+            { name: { contains: query, mode: 'insensitive' } }, // Nombre producto
+            { owner: { name: { contains: query, mode: 'insensitive' } } } // Nombre dueño
+        ]
+    } : undefined,
     include: {
       variants: true,
       category: true,
@@ -2182,28 +2442,40 @@ export default async function ProductsPage() {
   return (
     <div className="p-8 max-w-7xl mx-auto">
       {/* HEADER */}
-      <div className="flex justify-between items-center mb-8">
-        <h1 className="text-3xl font-bold text-gray-800">Inventario de Productos</h1>
+      <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
+        <h1 className="text-3xl font-bold text-gray-800">Inventario</h1>
         
-        {/* Enlace rápido al importador masivo */}
-        <Link 
-          href="/products/import" 
-          className="bg-green-600 text-white px-5 py-2 rounded-lg shadow hover:bg-green-700 font-bold text-sm flex items-center gap-2"
-        >
-          📄 Importar Excel
-        </Link>
+        <div className="flex gap-3">
+            <Link 
+              href="/inventory" 
+              className="bg-slate-800 text-white px-4 py-2 rounded-lg shadow hover:bg-slate-900 font-bold text-sm flex items-center gap-2 transition"
+            >
+              📦 Stock
+            </Link>
+            <Link 
+              href="/products/import" 
+              className="bg-green-600 text-white px-4 py-2 rounded-lg shadow hover:bg-green-700 font-bold text-sm flex items-center gap-2 transition"
+            >
+              📄 Importar
+            </Link>
+        </div>
+      </div>
+
+      {/* BARRA DE BÚSQUEDA */}
+      <div className="mb-8 max-w-md">
+         <SearchInput placeholder="Buscar por producto o dueño..." />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         
-        {/* COLUMNA IZQUIERDA: FORMULARIO ALTA RÁPIDA */}
+        {/* COLUMNA IZQUIERDA: FORMULARIO */}
         <div className="lg:col-span-1">
-          <div className="sticky top-4">
+          <div className="sticky top-24">
              <ProductForm owners={owners} categories={categories} />
           </div>
         </div>
 
-        {/* COLUMNA DERECHA: TABLA DE GESTIÓN */}
+        {/* COLUMNA DERECHA: TABLA */}
         <div className="lg:col-span-2">
           <div className="bg-white rounded-lg shadow overflow-hidden border border-gray-200">
             <table className="w-full text-sm text-left">
@@ -2218,28 +2490,20 @@ export default async function ProductsPage() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {products.map(p => {
-                  const variant = p.variants[0] // Variante principal
+                  const variant = p.variants[0]
                   const isArchived = !p.isActive
 
                   return (
                     <tr 
                       key={p.id} 
-                      className={`transition duration-150
-                        ${isArchived 
-                            ? 'bg-gray-100 opacity-60 grayscale' // Estilo "desactivado"
-                            : 'hover:bg-blue-50 bg-white'
-                        }
-                      `}
+                      className={`transition duration-150 ${isArchived ? 'bg-gray-100 opacity-60 grayscale' : 'hover:bg-blue-50 bg-white'}`}
                     >
-                      {/* PRODUCTO */}
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-3">
                             {variant?.imageUrl ? (
                             <img src={variant.imageUrl} className="w-10 h-10 object-cover rounded border" />
                             ) : (
-                            <div className="w-10 h-10 bg-gray-200 rounded flex items-center justify-center text-xs text-gray-400">
-                                Sin foto
-                            </div>
+                            <div className="w-10 h-10 bg-gray-200 rounded flex items-center justify-center text-xs text-gray-400">Sin foto</div>
                             )}
                             <div>
                                 <p className="font-bold text-gray-900 leading-tight">
@@ -2250,18 +2514,8 @@ export default async function ProductsPage() {
                             </div>
                         </div>
                       </td>
-
-                      {/* CATEGORÍA */}
-                      <td className="px-4 py-3 text-gray-600">
-                        {p.category.name}
-                      </td>
-
-                      {/* PRECIO */}
-                      <td className="px-4 py-3 font-bold text-green-700 text-base">
-                        ${variant?.salePrice.toString()}
-                      </td>
-
-                      {/* STOCK */}
+                      <td className="px-4 py-3 text-gray-600">{p.category.name}</td>
+                      <td className="px-4 py-3 font-bold text-green-700 text-base">${variant?.salePrice.toString()}</td>
                       <td className="px-4 py-3 text-center">
                         {variant?.stock === 0 ? (
                           <span className="text-red-600 bg-red-100 px-2 py-1 rounded text-xs font-bold">AGOTADO</span>
@@ -2269,15 +2523,9 @@ export default async function ProductsPage() {
                           <span className="font-mono font-bold text-gray-700">{variant?.stock}</span>
                         )}
                       </td>
-
-                      {/* ACCIONES (Componente Cliente) */}
                       <td className="px-4 py-3">
                         <div className="flex justify-center">
-                            <ProductActions 
-                                id={p.id} 
-                                isActive={p.isActive} 
-                                stock={variant?.stock || 0}
-                            />
+                            <ProductActions id={p.id} isActive={p.isActive} stock={variant?.stock || 0} />
                         </div>
                       </td>
                     </tr>
@@ -2287,8 +2535,7 @@ export default async function ProductsPage() {
                 {products.length === 0 && (
                   <tr>
                     <td colSpan={5} className="text-center py-12 text-gray-500">
-                      <p className="text-lg">Tu inventario está vacío.</p>
-                      <p className="text-sm">¡Agregá el primer producto a la izquierda!</p>
+                      {query ? "No se encontraron resultados para tu búsqueda." : "Inventario vacío."}
                     </td>
                   </tr>
                 )}
@@ -2373,78 +2620,276 @@ export default async function EditProductPage({ params }: Props) {
 
 // src/app/sales/page.tsx
 import { prisma } from "@/lib/prisma"
-import CancelSaleButton from "@/components/CancelSaleButton" // 👈 Importamos el nuevo componente
+import { getLocalDateISO, getArgentinaDayRange } from "@/lib/utils" // 👈 Importamos
+import Link from "next/link"
+import SaleRow from "@/components/SaleRow"
 
-export default async function SalesHistoryPage() {
-  // Buscamos las ventas
+interface Props {
+  searchParams: Promise<{ 
+    dateFrom?: string 
+    dateTo?: string 
+    method?: string
+  }>
+}
+
+export default async function SalesHistoryPage({ searchParams }: Props) {
+  const { dateFrom, dateTo, method } = await searchParams
+
+  const today = getLocalDateISO()
+  const fromStr = dateFrom || today
+  const toStr = dateTo || today
+
+  // 1. Usar Helper para rangos (Garantiza GMT-3)
+  const fromDate = getArgentinaDayRange(fromStr).start
+  const toDate = getArgentinaDayRange(toStr).end
+
+  // 2. Consulta a DB
   const sales = await prisma.sale.findMany({
+    where: {
+      createdAt: {
+        gte: fromDate,
+        lte: toDate
+      },
+      paymentMethod: method ? { equals: method } : undefined
+    },
     include: {
       items: true
     },
     orderBy: { createdAt: 'desc' }
   })
 
+  // 3. Cálculos de Totales
+  const totalPeriodo = sales
+    .filter(s => s.status === 'COMPLETED')
+    .reduce((sum, s) => sum + Number(s.total), 0)
+
+  const cantVentas = sales.filter(s => s.status === 'COMPLETED').length
+
   return (
     <div className="p-8 max-w-5xl mx-auto">
-      <h1 className="text-3xl font-bold mb-8">Historial de Ventas</h1>
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+        <h1 className="text-3xl font-bold text-gray-800">Historial de Ventas</h1>
+        
+        {/* Resumen Flotante */}
+        <div className="bg-slate-900 text-white px-6 py-3 rounded-lg shadow-lg text-right">
+            <p className="text-xs text-slate-400 uppercase font-bold">Total Periodo</p>
+            <p className="text-2xl font-bold">${totalPeriodo.toLocaleString()}</p>
+            <p className="text-xs text-slate-500">{cantVentas} operaciones</p>
+        </div>
+      </div>
 
-      <div className="bg-white rounded-lg shadow overflow-hidden">
+      {/* BARRA DE FILTROS */}
+      <div className="bg-white p-4 rounded-lg shadow-sm border mb-6">
+        <form className="flex flex-wrap items-end gap-4">
+            
+            {/* Desde */}
+            <div className="flex flex-col gap-1">
+                <label className="text-xs font-bold text-gray-500 uppercase">Desde</label>
+                <input 
+                    name="dateFrom" 
+                    type="date" 
+                    defaultValue={fromStr}
+                    className="border p-2 rounded text-sm font-bold"
+                />
+            </div>
+
+            {/* Hasta */}
+            <div className="flex flex-col gap-1">
+                <label className="text-xs font-bold text-gray-500 uppercase">Hasta</label>
+                <input 
+                    name="dateTo" 
+                    type="date" 
+                    defaultValue={toStr}
+                    className="border p-2 rounded text-sm font-bold"
+                />
+            </div>
+
+            {/* Método */}
+            <div className="flex flex-col gap-1">
+                <label className="text-xs font-bold text-gray-500 uppercase">Medio Pago</label>
+                <select 
+                    name="method" 
+                    defaultValue={method || ""}
+                    className="border p-2 rounded text-sm bg-white min-w-[120px]"
+                >
+                    <option value="">Todos</option>
+                    <option value="CASH">Efectivo</option>
+                    <option value="TRANSFER">Transferencia</option>
+                </select>
+            </div>
+
+            <button className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded text-sm font-bold shadow transition">
+                Filtrar
+            </button>
+            
+            {(dateFrom || dateTo || method) && (
+                <Link href="/sales" className="text-sm text-red-500 underline py-2">
+                    Borrar Filtros
+                </Link>
+            )}
+        </form>
+      </div>
+
+      {/* TABLA DE RESULTADOS */}
+      <div className="bg-white rounded-lg shadow overflow-hidden border">
         <table className="w-full text-left">
-          <thead className="bg-gray-100 text-gray-700 uppercase text-sm">
+          <thead className="bg-gray-100 text-gray-600 uppercase text-xs font-bold">
             <tr>
-              <th className="p-4">Fecha / ID</th>
-              <th className="p-4">Items</th>
+              <th className="p-4">Fecha</th>
+              <th className="p-4">Método</th>
               <th className="p-4">Total</th>
-              <th className="p-4">Estado</th>
-              <th className="p-4">Acción</th>
+              <th className="p-4 text-center">Detalle</th>
             </tr>
           </thead>
           <tbody className="divide-y">
-            {sales.map((sale) => (
-              <tr key={sale.id} className={sale.status === 'CANCELLED' ? 'bg-red-50' : 'hover:bg-gray-50'}>
-                <td className="p-4">
-                  <p className="font-bold">{sale.createdAt.toLocaleDateString()}</p>
-                  <p className="text-xs text-gray-500 font-mono">{sale.id.slice(0, 8)}...</p>
-                </td>
-                
-                <td className="p-4">
-                  <ul className="text-sm list-disc pl-4">
-                    {sale.items.map(item => (
-                      <li key={item.id}>
-                        {item.quantity} x {item.description}
-                      </li>
-                    ))}
-                  </ul>
-                </td>
-
-                <td className="p-4 font-bold text-lg">
-                  ${sale.total.toString()}
-                </td>
-
-                <td className="p-4">
-                  <span className={`px-2 py-1 rounded text-xs font-bold
-                    ${sale.status === 'COMPLETED' ? 'bg-green-100 text-green-700' : 'bg-red-200 text-red-800'}
-                  `}>
-                    {sale.status === 'COMPLETED' ? 'COBRADO' : 'ANULADO'}
-                  </span>
-                </td>
-
-                <td className="p-4">
-                  {sale.status === 'COMPLETED' && (
-                    /* 👇 Usamos el componente interactivo aquí */
-                    <CancelSaleButton saleId={sale.id} />
-                  )}
-                </td>
-              </tr>
-            ))}
+            {sales.length === 0 ? (
+                <tr>
+                    <td colSpan={4} className="p-10 text-center text-gray-400">
+                        No hay ventas en este período.
+                    </td>
+                </tr>
+            ) : (
+                sales.map(sale => {
+                    const saleForClient = {
+                        ...sale,
+                        total: Number(sale.total),
+                        items: sale.items.map(i => ({
+                            ...i,
+                            priceAtSale: Number(i.priceAtSale)
+                        }))
+                    }
+                    return <SaleRow key={sale.id} sale={saleForClient} />
+                })
+            )}
           </tbody>
         </table>
+      </div>
+    </div>
+  )
+}
 
-        {sales.length === 0 && (
-          <div className="p-10 text-center text-gray-500">
-            No hay ventas registradas aún.
-          </div>
-        )}
+--- File: AppointmentCard.tsx (in subfolder: components) ---
+
+// src/components/AppointmentCard.tsx
+'use client'
+
+import { cancelAppointment, updateAppointmentStatus } from "@/actions/appointment-actions"
+import Link from "next/link"
+import { useState } from "react"
+
+// Definimos el tipo de datos que recibe la tarjeta (lo que viene de Prisma)
+type AppointmentData = {
+  id: string
+  startTime: Date
+  endTime: Date
+  status: string // En Prisma es un Enum, aquí lo manejamos como string
+  pet: {
+    name: string
+    breed: string | null
+    ownerName: string
+  }
+}
+
+export default function AppointmentCard({ appt }: { appt: AppointmentData }) {
+  const [loading, setLoading] = useState(false)
+
+  // Helpers de formato
+  const start = appt.startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const end = appt.endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
+  // Función genérica para cambiar estado
+  const handleStatusChange = async (newStatus: 'CONFIRMED' | 'COMPLETED') => {
+    setLoading(true)
+    await updateAppointmentStatus(appt.id, newStatus)
+    setLoading(false)
+  }
+
+  // Definir colores según estado
+  let statusColor = "bg-white border-l-4 border-gray-300" // Default
+  if (appt.status === 'PENDING') statusColor = "bg-white border-l-4 border-yellow-400"
+  if (appt.status === 'CONFIRMED') statusColor = "bg-blue-50 border-l-4 border-blue-500" // En proceso
+  if (appt.status === 'COMPLETED') statusColor = "bg-green-50 border-l-4 border-green-500" // Terminado
+  if (appt.status === 'BILLED') statusColor = "bg-gray-100 border-l-4 border-gray-400 opacity-75" // Cobrado
+
+  return (
+    <div className={`p-4 rounded-lg shadow-sm border border-gray-200 transition-all ${statusColor}`}>
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        
+        {/* INFO PRINCIPAL */}
+        <div className="flex items-center gap-4">
+            {/* Hora */}
+            <div className="flex flex-col items-center justify-center min-w-[60px]">
+                <span className="text-xl font-bold text-gray-800">{start}</span>
+                <span className="text-xs text-gray-500">{end}</span>
+            </div>
+
+            {/* Datos Mascota */}
+            <div>
+                <h3 className="font-bold text-lg text-gray-900 leading-none mb-1">
+                    {appt.pet.name}
+                </h3>
+                <p className="text-xs text-gray-600">
+                    {appt.pet.breed} • {appt.pet.ownerName}
+                </p>
+                {/* Badge de Estado Visual */}
+                <span className={`
+                    inline-block mt-2 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider
+                    ${appt.status === 'PENDING' ? 'bg-yellow-100 text-yellow-800' : ''}
+                    ${appt.status === 'CONFIRMED' ? 'bg-blue-100 text-blue-800' : ''}
+                    ${appt.status === 'COMPLETED' ? 'bg-green-100 text-green-800' : ''}
+                    ${appt.status === 'BILLED' ? 'bg-gray-200 text-gray-600' : ''}
+                `}>
+                    {appt.status === 'CONFIRMED' ? 'EN PROCESO' : appt.status}
+                </span>
+            </div>
+        </div>
+
+        {/* BOTONERA DE ACCIONES (WORKFLOW) */}
+        <div className="flex flex-wrap gap-2 items-center justify-end w-full sm:w-auto">
+            
+            {/* 1. SI ESTÁ PENDIENTE -> CONFIRMAR (LLEGÓ) */}
+            {appt.status === 'PENDING' && (
+                <button 
+                    disabled={loading}
+                    onClick={() => handleStatusChange('CONFIRMED')}
+                    className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-3 py-2 rounded transition"
+                >
+                    🐕 LLEGÓ
+                </button>
+            )}
+
+            {/* 2. SI ESTÁ EN PROCESO -> TERMINAR (LISTO) */}
+            {appt.status === 'CONFIRMED' && (
+                <button 
+                    disabled={loading}
+                    onClick={() => handleStatusChange('COMPLETED')}
+                    className="bg-green-600 hover:bg-green-700 text-white text-xs font-bold px-3 py-2 rounded transition shadow-sm animate-pulse"
+                >
+                    ✨ LISTO
+                </button>
+            )}
+
+            {/* 3. BOTÓN COBRAR (Siempre disponible si no está cobrado) */}
+            {appt.status !== 'BILLED' && (
+                <Link
+                    href={`/pos?apptId=${appt.id}&petName=${encodeURIComponent(appt.pet.name)}`}
+                    className="bg-slate-800 hover:bg-black text-white text-xs font-bold px-3 py-2 rounded transition flex items-center gap-1 shadow"
+                >
+                    💰 COBRAR
+                </Link>
+            )}
+
+            {/* 4. CANCELAR (Solo si no se cobró ni completó) */}
+            {(appt.status === 'PENDING' || appt.status === 'CONFIRMED') && (
+                <form action={cancelAppointment}>
+                    <input type="hidden" name="id" value={appt.id} />
+                    <button className="text-red-400 hover:text-red-600 text-xs font-bold px-2 py-2 hover:bg-red-50 rounded">
+                        ✖
+                    </button>
+                </form>
+            )}
+
+        </div>
       </div>
     </div>
   )
@@ -2462,7 +2907,7 @@ import { useRouter } from "next/navigation"
 
 type Props = {
   pets: { id: string, name: string, breed: string | null }[]
-  selectedDate: string
+  selectedDate: string // Viene 'YYYY-MM-DD'
 }
 
 export default function AppointmentForm({ pets, selectedDate }: Props) {
@@ -2470,43 +2915,34 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
   const router = useRouter()
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault() // Evitamos la recarga normal del navegador
+    e.preventDefault() 
     setLoading(true)
 
-    // Capturamos los datos del formulario
     const form = e.currentTarget
     const formData = new FormData(form)
 
-    // Agregamos la fecha que viene por prop (porque el input hidden a veces es mañoso)
-    formData.set("date", selectedDate)
-
-    // Llamamos al Server Action
+    // Nota: Ahora 'date' viene del input visible, ya no lo inyectamos manualmente
+    
     const result = await createAppointment(formData)
 
     setLoading(false)
 
     if (result.error) {
-      // 🛑 ERROR: Mostramos alerta con el motivo
       alert("❌ NO SE PUDO AGENDAR:\n" + result.error)
     } else {
-      // ✅ ÉXITO: Limpiamos y refrescamos la vista
       alert("✅ Turno agendado correctamente")
-      form.reset() // Limpia los inputs
-      router.refresh() // Recarga los datos de la agenda a la izquierda
+      form.reset() 
+      router.refresh()
     }
   }
 
   return (
-    <div className="bg-slate-50 p-6 rounded-lg border border-slate-200 sticky top-4 shadow-sm">
+    <div className="bg-slate-50 p-6 rounded-lg border border-slate-200 shadow-sm sticky top-6">
       <h2 className="text-xl font-bold mb-4 text-slate-800">Agendar Turno</h2>
       
       <form onSubmit={handleSubmit} className="space-y-4">
         
-        {/* Mostramos visualmente la fecha para que el usuario sepa dónde está parado */}
-        <div className="text-sm text-slate-500 font-bold uppercase tracking-wider mb-2">
-           Fecha: {selectedDate}
-        </div>
-
+        {/* SELECCIÓN DE MASCOTA */}
         <div>
           <label className="block text-sm font-bold text-gray-700 mb-1">Mascota</label>
           <select name="petId" required className="w-full p-2 border rounded bg-white focus:ring-2 focus:ring-blue-500 outline-none">
@@ -2522,6 +2958,19 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
           </div>
         </div>
 
+        {/* FECHA (Ahora editable) */}
+        <div>
+            <label className="block text-sm font-bold text-gray-700 mb-1">Fecha</label>
+            <input 
+                type="date" 
+                name="date"
+                defaultValue={selectedDate} // Pre-cargamos la fecha actual de la vista
+                required
+                className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 outline-none"
+            />
+        </div>
+
+        {/* HORA Y DURACIÓN */}
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-bold text-gray-700 mb-1">Hora Inicio</label>
@@ -2844,60 +3293,110 @@ import { usePathname } from "next/navigation"
 export default function MainNav() {
   const pathname = usePathname()
 
-  // Definimos las rutas del sistema
+  // Definimos las rutas
   const routes = [
-    { href: "/dashboard", label: "📊 Dashboard", exact: true },
-    { href: "/agenda", label: "📅 Agenda", exact: false },
-    { href: "/pos", label: "💰 CAJA", exact: true, highlight: true }, // Resaltado especial
-    { href: "/sales", label: "🗂️ Ventas", exact: false },
-    { href: "/products", label: "📦 Productos", exact: false },
-    { href: "/pets", label: "🐶 Clientes", exact: false },
-    { href: "/owners", label: "👥 Consignantes", exact: false }, // Usamos emoji aproximado
-    // Sub-ruta importante que queremos tener a mano
-    { href: "/owners/balance", label: "⚖️ Finanzas", exact: true },
+    { href: "/dashboard", label: "Dashboard", icon: "📊", exact: true },
+    { href: "/pos", label: "CAJA", icon: "💰", exact: true, highlight: true },
+    { href: "/agenda", label: "Agenda", icon: "📅", exact: false },
+    { href: "/sales", label: "Ventas", icon: "🗂️", exact: false },
+    { href: "/products", label: "Productos", icon: "📦", exact: false },
+    { href: "/pets", label: "Clientes", icon: "🐶", exact: false },
+    { href: "/owners", label: "Consign.", icon: "👥", exact: false },
+    { href: "/owners/balance", label: "Finanzas", icon: "⚖️", exact: true },
   ]
 
   return (
-    <nav className="bg-slate-900 text-gray-300 border-b border-slate-800 sticky top-0 z-50">
-      <div className="max-w-7xl mx-auto px-4">
-        <div className="flex h-16 items-center justify-between overflow-x-auto">
-          
-          {/* LOGO / NOMBRE */}
-          <div className="flex-shrink-0 font-bold text-white text-xl tracking-tight mr-8">
+    <>
+      {/* ==============================================
+          ESTILO ESCRITORIO (Sidebar Izquierda)
+          Visible solo en pantallas medianas o grandes (md:flex)
+         ============================================== */}
+      <aside className="hidden md:flex w-64 flex-col bg-slate-900 text-gray-300 border-r border-slate-800 h-screen sticky top-0 overflow-y-auto">
+        
+        {/* LOGO */}
+        <div className="p-6 border-b border-slate-800">
+          <h1 className="text-2xl font-bold text-white tracking-tight">
             GUAPECANES
-          </div>
+            <span className="text-green-500">.</span>
+          </h1>
+          <p className="text-xs text-slate-500 mt-1">Sistema de Gestión v3.0</p>
+        </div>
 
-          {/* LISTA DE ENLACES */}
-          <div className="flex space-x-2">
-            {routes.map((route) => {
-              // Lógica para saber si el link está activo
-              const isActive = route.exact 
+        {/* LISTA DE NAVEGACIÓN VERTICAL */}
+        <nav className="flex-1 py-6 px-3 space-y-2">
+          {routes.map((route) => {
+            const isActive = route.exact 
                 ? pathname === route.href
                 : pathname.startsWith(route.href)
 
-              return (
-                <Link
-                  key={route.href}
-                  href={route.href}
-                  className={`
-                    px-3 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap
-                    ${route.highlight 
-                        ? 'bg-green-600 text-white hover:bg-green-500 shadow-md shadow-green-900/20' // Estilo botón Caja
-                        : isActive 
-                            ? 'bg-slate-800 text-white' // Estilo Activo normal
-                            : 'hover:bg-slate-800 hover:text-white' // Estilo Inactivo
-                    }
-                  `}
-                >
-                  {route.label}
-                </Link>
-              )
-            })}
-          </div>
-          
+            return (
+              <Link
+                key={route.href}
+                href={route.href}
+                className={`
+                  flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200
+                  ${route.highlight 
+                      ? 'bg-gradient-to-r from-green-600 to-green-700 text-white shadow-lg shadow-green-900/20 hover:scale-105 justify-center text-base' 
+                      : isActive 
+                          ? 'bg-slate-800 text-white border-l-4 border-blue-500' 
+                          : 'hover:bg-slate-800 hover:text-white hover:pl-5'
+                  }
+                `}
+              >
+                <span className="text-xl">{route.icon}</span>
+                {route.label}
+              </Link>
+            )
+          })}
+        </nav>
+
+        {/* FOOTER DEL SIDEBAR */}
+        <div className="p-4 border-t border-slate-800 text-center">
+            <div className="text-xs text-slate-500">
+                Usuario: Staff<br/>
+                <span className="text-green-500">● Online</span>
+            </div>
         </div>
-      </div>
-    </nav>
+      </aside>
+
+
+      {/* ==============================================
+          ESTILO MÓVIL (Bottom Navigation)
+          Visible solo en pantallas pequeñas (md:hidden)
+          Fijo abajo.
+         ============================================== */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-slate-900 border-t border-slate-800 flex justify-between items-center px-2 py-2 safe-area-bottom shadow-2xl">
+        {routes.map((route) => {
+            // En móvil mostramos menos items o íconos más grandes. 
+            // Filtramos algunos si son muchos, o usamos scroll horizontal.
+            // Aquí usamos scroll horizontal simple si desborda.
+            const isActive = route.exact 
+                ? pathname === route.href
+                : pathname.startsWith(route.href)
+
+            return (
+              <Link
+                key={route.href}
+                href={route.href}
+                className={`
+                  flex flex-col items-center justify-center min-w-[60px] p-1 rounded-md transition-colors
+                  ${route.highlight 
+                      ? 'bg-green-600 text-white -mt-6 h-14 w-14 rounded-full shadow-lg border-4 border-gray-50' // Efecto botón flotante para CAJA
+                      : isActive 
+                          ? 'text-white' 
+                          : 'text-slate-500 hover:text-slate-300'
+                  }
+                `}
+              >
+                <span className={`${route.highlight ? 'text-2xl' : 'text-xl'}`}>{route.icon}</span>
+                {!route.highlight && (
+                    <span className="text-[9px] font-bold mt-1 uppercase">{route.label.slice(0, 6)}</span>
+                )}
+              </Link>
+            )
+        })}
+      </nav>
+    </>
   )
 }
 
@@ -3011,9 +3510,10 @@ export default function OwnerForm({ initialData }: { initialData?: OwnerData }) 
 // src/components/PosSystem.tsx
 'use client'
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { processSale } from "@/actions/sale-actions"
 import { useSearchParams, useRouter } from "next/navigation"
+import TicketView from "./TicketView"
 
 type ProductType = {
   id: string
@@ -3022,231 +3522,335 @@ type ProductType = {
   stock: number
   imageUrl: string | null
   ownerName: string
+  categoryName: string 
 }
 
-// Estructura interna del carrito en el Frontend
 type CartItem = {
   type: 'PRODUCT' | 'SERVICE'
   id: string
   name: string
   price: number
   quantity: number
-  stockMax?: number // Solo aplica a productos físicos
+  stockMax?: number
+}
+
+type PaymentMethod = "CASH" | "TRANSFER"
+
+// Estructura que espera el TicketView
+type SaleResult = {
+    id: string
+    date: Date
+    items: { description: string; quantity: number; price: number }[] // 👈 Ajustado
+    total: number
+    method: PaymentMethod
 }
 
 export default function PosSystem({ products }: { products: ProductType[] }) {
   const [cart, setCart] = useState<CartItem[]>([])
   const [loading, setLoading] = useState(false)
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH")
+  const [lastSale, setLastSale] = useState<SaleResult | null>(null)
+
+  const [searchTerm, setSearchTerm] = useState("")
+  const [selectedCategory, setSelectedCategory] = useState<string | "ALL">("ALL")
   
-  // Hooks de Next.js para leer URL y navegar
   const searchParams = useSearchParams()
   const router = useRouter()
 
-  // 1. DETECTAR SI VENIMOS DE LA AGENDA
-  // Se ejecuta al cargar la página. Si hay "apptId" en la URL, agregamos el servicio.
   useEffect(() => {
     const apptId = searchParams.get("apptId")
     const petName = searchParams.get("petName")
     
-    // Solo agregamos si el carrito está vacío para no duplicar al recargar
     if (apptId && petName && cart.length === 0) {
       setCart([{
         type: 'SERVICE',
         id: apptId,
         name: `Servicio: ${petName}`,
-        price: 0, // Inicia en 0, el usuario debe poner el precio
+        price: 0,
         quantity: 1
       }])
     }
-  }, [searchParams]) // Se ejecuta cuando cambian los params
+  }, [searchParams])
 
-  // Función: Agregar Producto al Carrito
+  const categories = useMemo(() => {
+    const cats = products.map(p => p.categoryName)
+    return ["ALL", ...Array.from(new Set(cats))].sort()
+  }, [products])
+
+  const filteredProducts = useMemo(() => {
+    const term = searchTerm.toLowerCase()
+    return products.filter(p => {
+        const matchesCategory = selectedCategory === "ALL" || p.categoryName === selectedCategory
+        const matchesText = 
+            p.name.toLowerCase().includes(term) || 
+            p.ownerName.toLowerCase().includes(term) ||
+            p.categoryName.toLowerCase().includes(term)
+        return matchesCategory && matchesText
+    })
+  }, [products, searchTerm, selectedCategory]) 
+
   const addProductToCart = (product: ProductType) => {
     if (product.stock <= 0) return alert("Sin stock")
 
     setCart(current => {
-      // Verificamos si ya está en el carrito
       const existing = current.find(item => item.id === product.id && item.type === 'PRODUCT')
-      
       if (existing) {
         if (existing.quantity >= product.stock) {
           alert("No hay más stock disponible")
           return current
         }
-        return current.map(item => 
-          item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item
-        )
+        return current.map(item => item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item)
       }
-      // Si no existe, lo agregamos
-      return [...current, { 
-        type: 'PRODUCT',
-        id: product.id,
-        name: product.name,
-        price: product.price,
-        quantity: 1,
-        stockMax: product.stock
-      }]
+      return [...current, { type: 'PRODUCT', id: product.id, name: product.name, price: product.price, quantity: 1, stockMax: product.stock }]
     })
   }
 
-  // Función: Modificar Precio (Exclusivo para Servicios)
   const updateServicePrice = (index: number, newPrice: string) => {
     const val = parseFloat(newPrice)
-    setCart(current => current.map((item, i) => 
-        i === index ? { ...item, price: isNaN(val) ? 0 : val } : item
-    ))
+    setCart(current => current.map((item, i) => i === index ? { ...item, price: isNaN(val) ? 0 : val } : item))
   }
 
-  // Función: Quitar del Carrito
   const removeFromCart = (index: number) => {
     setCart(current => current.filter((_, i) => i !== index))
   }
 
-  // Calcular Total en tiempo real
   const total = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0)
 
-  // Función Principal: Cobrar
   const handleCheckout = async () => {
-    // Validaciones básicas de seguridad en cliente
     if (total === 0 && !confirm("¿Confirmar venta por $0?")) return
-    if (!confirm(`¿Confirmar venta por $${total.toLocaleString()}?`)) return
+    const methodText = paymentMethod === 'CASH' ? 'EFECTIVO' : 'TRANSFERENCIA'
+    if (!confirm(`¿Cobrar $${total.toLocaleString()} con ${methodText}?`)) return
     
     setLoading(true)
     
-    // Preparamos el payload para el Server Action
-    const payload = cart.map(item => ({
-      type: item.type,
-      id: item.id,
-      description: item.name,
-      price: item.price,
-      quantity: item.quantity
+    // Payload para el servidor (Aquí sí usábamos description, eso estaba bien)
+    const payload = cart.map(item => ({ 
+        type: item.type, 
+        id: item.id, 
+        description: item.name, 
+        price: item.price, 
+        quantity: item.quantity 
     }))
-
-    // Llamada al servidor
-    const result = await processSale(payload, total)
+    
+    const result = await processSale(payload, total, paymentMethod)
     
     setLoading(false)
 
-    if (result.success) {
-      alert("¡Venta Exitosa!")
-      setCart([])
+    if (result.success && result.saleId && result.date) {
       
-      // Si veníamos de la agenda, volvemos a ella automáticamente
+      // ✅ CORRECCIÓN AQUÍ:
+      // Mapeamos el carrito para que tenga la propiedad 'description' en lugar de 'name'
+      // para que coincida con lo que espera el TicketView.
+      const ticketItems = cart.map(item => ({
+        description: item.name, // 👈 EL CAMBIO CLAVE
+        quantity: item.quantity,
+        price: item.price
+      }))
+
+      setLastSale({
+        id: result.saleId,
+        date: result.date,
+        items: ticketItems, // Usamos la lista mapeada
+        total: total,
+        method: paymentMethod
+      })
+      
+      setCart([]) 
+      
       if (searchParams.get("apptId")) {
-        router.push("/agenda")
+         router.replace("/pos") 
       }
     } else {
       alert("Error: " + result.error)
     }
   }
 
+  if (lastSale) {
+    return (
+        <TicketView 
+            mode="POS" // 👈 Explicito
+            saleId={lastSale.id}
+            date={lastSale.date}
+            items={lastSale.items}
+            total={lastSale.total}
+            paymentMethod={lastSale.method}
+            onClose={() => setLastSale(null)} // 👈 Cambiado de onNewSale a onClose
+        />
+    )
+  }
+
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pb-20">
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pb-20 h-full">
       
-      {/* SECCIÓN IZQUIERDA: PRODUCTOS FÍSICOS */}
-      <div className="md:col-span-2">
-        <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-          {products.map(p => (
-            <button 
-              key={p.id}
-              onClick={() => addProductToCart(p)}
-              disabled={p.stock === 0}
-              className={`p-4 border rounded-lg text-left transition shadow-sm flex flex-col gap-2 min-h-[180px]
-                ${p.stock === 0 ? 'bg-gray-100 opacity-50 cursor-not-allowed' : 'bg-white hover:border-blue-500 hover:shadow-md'}
-              `}
-            >
-              <div className="flex-1 w-full">
-                 {p.imageUrl ? (
-                     <img src={p.imageUrl} alt={p.name} className="h-24 w-full object-cover rounded mb-2"/>
-                 ) : (
-                     <div className="h-24 bg-gray-200 rounded mb-2 flex items-center justify-center text-xs text-gray-500">Sin Foto</div>
-                 )}
-                 <h3 className="font-bold text-gray-800 text-sm leading-tight">{p.name}</h3>
-              </div>
-              <div className="flex justify-between items-center w-full">
-                <span className="text-blue-600 font-bold">${p.price}</span>
-                <span className="text-xs text-gray-500">Stock: {p.stock}</span>
-              </div>
-            </button>
-          ))}
+      {/* === COLUMNA IZQUIERDA === */}
+      <div className="md:col-span-2 flex flex-col gap-4 h-full overflow-hidden">
+        
+        <div className="bg-white p-4 rounded-lg shadow-sm border space-y-3">
+            <div className="relative">
+                <input 
+                    type="text" 
+                    placeholder="🔍 Buscar producto, dueño..." 
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="w-full p-3 pl-10 border rounded-lg bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none transition"
+                    autoFocus
+                />
+                {searchTerm && (
+                    <button 
+                        onClick={() => setSearchTerm("")}
+                        className="absolute right-3 top-3 text-gray-400 hover:text-gray-600"
+                    >
+                        ✕
+                    </button>
+                )}
+            </div>
+
+            <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+                {categories.map(cat => (
+                    <button
+                        key={cat}
+                        onClick={() => setSelectedCategory(cat === selectedCategory ? "ALL" : cat)}
+                        className={`
+                            px-4 py-1.5 rounded-full text-xs font-bold whitespace-nowrap border transition
+                            ${selectedCategory === cat 
+                                ? 'bg-slate-800 text-white border-slate-800' 
+                                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-100'
+                            }
+                        `}
+                    >
+                        {cat === "ALL" ? "Todo" : cat}
+                    </button>
+                ))}
+            </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto pr-2">
+            {filteredProducts.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+                    <span className="text-4xl mb-2">🔍</span>
+                    <p>No encontré nada con "{searchTerm}"</p>
+                    <button onClick={() => {setSearchTerm(""); setSelectedCategory("ALL")}} className="text-blue-500 underline text-sm mt-2">Limpiar filtros</button>
+                </div>
+            ) : (
+                <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 pb-20">
+                    {filteredProducts.map(p => (
+                        <button 
+                            key={p.id}
+                            onClick={() => addProductToCart(p)}
+                            disabled={p.stock === 0}
+                            className={`p-3 border rounded-lg text-left transition shadow-sm flex flex-col gap-2 relative group
+                                ${p.stock === 0 ? 'bg-gray-100 opacity-60 grayscale cursor-not-allowed' : 'bg-white hover:border-blue-500 hover:shadow-md'}
+                            `}
+                        >
+                            <div className="w-full h-24 bg-gray-100 rounded overflow-hidden relative">
+                                {p.imageUrl ? (
+                                    <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover"/>
+                                ) : (
+                                    <div className="w-full h-full flex items-center justify-center text-xs text-gray-400">Sin Foto</div>
+                                )}
+                                <div className={`absolute top-1 right-1 px-1.5 py-0.5 rounded text-[10px] font-bold text-white shadow
+                                    ${p.stock === 0 ? 'bg-red-500' : p.stock <= 3 ? 'bg-orange-500' : 'bg-green-600'}
+                                `}>
+                                    {p.stock} u.
+                                </div>
+                            </div>
+                            
+                            <div className="flex-1">
+                                <h3 className="font-bold text-gray-800 text-sm leading-tight line-clamp-2">{p.name}</h3>
+                                <p className="text-[10px] text-gray-500 truncate">{p.ownerName}</p>
+                            </div>
+                            
+                            <div className="mt-auto pt-2 border-t border-dashed border-gray-200 flex justify-between items-center">
+                                <span className="text-blue-700 font-bold text-lg">${p.price}</span>
+                                <span className="text-[10px] bg-gray-100 text-gray-600 px-1.5 rounded">{p.categoryName}</span>
+                            </div>
+                        </button>
+                    ))}
+                </div>
+            )}
         </div>
       </div>
 
-      {/* SECCIÓN DERECHA: TICKET / CARRITO */}
-      <div className="md:col-span-1">
-        <div className="bg-white border rounded-lg shadow-lg sticky top-4 flex flex-col h-[calc(100vh-2rem)]">
-          
-          {/* Cabecera del Ticket */}
-          <div className="p-4 border-b bg-gray-50">
-            <h2 className="font-bold text-xl text-gray-800">Ticket Actual</h2>
+      {/* === COLUMNA DERECHA === */}
+      <div className="md:col-span-1 h-full">
+        <div className="bg-white border rounded-lg shadow-lg flex flex-col h-[calc(100vh-2rem)] sticky top-4">
+          <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
+            <h2 className="font-bold text-lg text-gray-800">Ticket</h2>
+            <span className="text-xs bg-slate-200 px-2 py-1 rounded font-mono">{cart.length} items</span>
           </div>
           
-          {/* Lista de Items */}
           <div className="p-4 space-y-4 flex-1 overflow-y-auto">
             {cart.length === 0 && (
-              <p className="text-gray-400 text-center py-10">
-                El carrito está vacío.<br/>Seleccioná productos o servicios.
-              </p>
+              <div className="text-center py-20 opacity-50">
+                <p className="text-4xl mb-2">🛒</p>
+                <p className="text-sm">Escaneá o seleccioná<br/>productos.</p>
+              </div>
             )}
             
             {cart.map((item, index) => (
-              <div key={index} className="flex justify-between items-start border-b pb-3 animate-in fade-in slide-in-from-bottom-2">
+              <div key={index} className="flex justify-between items-start border-b pb-3 animate-in fade-in slide-in-from-right-4">
                 <div className="flex-1">
-                  <p className="font-medium text-gray-800">
-                    {/* Icono para diferenciar servicios de productos */}
+                  <p className="font-medium text-gray-800 text-sm">
                     {item.type === 'SERVICE' && <span className="mr-1">✂️</span>}
                     {item.name}
                   </p>
                   
-                  {/* Si es SERVICIO: Input para poner el precio */}
                   {item.type === 'SERVICE' ? (
                      <div className="mt-1 flex items-center gap-2">
-                        <span className="text-xs text-gray-500 font-bold">Precio: $</span>
+                        <span className="text-xs text-gray-500 font-bold">$</span>
                         <input 
                             type="number" 
                             value={item.price} 
                             onChange={(e) => updateServicePrice(index, e.target.value)}
-                            className="w-24 border rounded px-1 py-0.5 text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none"
-                            autoFocus
-                            placeholder="0.00"
+                            className="w-20 border rounded px-1 py-0.5 text-sm font-bold bg-gray-50"
                         />
                      </div>
                   ) : (
-                     // Si es PRODUCTO: Cantidad x Precio fijo
-                     <p className="text-sm text-gray-500">{item.quantity} x ${item.price}</p>
+                     <p className="text-xs text-gray-500 mt-1">{item.quantity} x ${item.price}</p>
                   )}
                 </div>
 
                 <div className="flex flex-col items-end gap-1">
                     <span className="font-bold text-gray-800">${(item.quantity * item.price).toLocaleString()}</span>
-                    <button 
-                        onClick={() => removeFromCart(index)}
-                        className="text-xs text-red-500 hover:text-red-700 underline"
-                    >
-                        Quitar
-                    </button>
+                    <button onClick={() => removeFromCart(index)} className="text-xs text-red-500 hover:bg-red-50 px-2 rounded">x</button>
                 </div>
               </div>
             ))}
           </div>
 
-          {/* Zona de Totales y Botón de Cobro */}
-          <div className="p-6 bg-slate-900 text-white rounded-b-lg mt-auto">
-            <div className="flex justify-between text-2xl font-bold mb-4">
-              <span>Total</span>
-              <span>${total.toLocaleString()}</span>
-            </div>
-            <button 
+          <div className="p-4 bg-gray-50 border-t">
+             <div className="grid grid-cols-2 gap-2 mb-4">
+                <button 
+                    onClick={() => setPaymentMethod("CASH")}
+                    className={`p-2 rounded text-xs font-bold border transition flex items-center justify-center gap-1
+                        ${paymentMethod === "CASH" ? "bg-green-600 text-white border-green-600" : "bg-white border-gray-300 text-gray-500"}
+                    `}
+                >
+                    💵 EFECTIVO
+                </button>
+                <button 
+                    onClick={() => setPaymentMethod("TRANSFER")}
+                    className={`p-2 rounded text-xs font-bold border transition flex items-center justify-center gap-1
+                        ${paymentMethod === "TRANSFER" ? "bg-blue-600 text-white border-blue-600" : "bg-white border-gray-300 text-gray-500"}
+                    `}
+                >
+                    🏦 TRANSFER.
+                </button>
+             </div>
+
+             <div className="flex justify-between text-2xl font-bold mb-4">
+                <span>Total</span>
+                <span>${total.toLocaleString()}</span>
+             </div>
+             
+             <button 
               onClick={handleCheckout}
               disabled={cart.length === 0 || loading}
-              className={`w-full py-4 rounded-lg font-bold text-xl transition transform active:scale-95
-                ${cart.length === 0 
-                    ? 'bg-gray-600 cursor-not-allowed text-gray-400' 
-                    : 'bg-green-500 hover:bg-green-600 text-white shadow-lg shadow-green-900/20'
-                }
+              className={`w-full py-3 rounded font-bold text-lg transition active:scale-95 text-white shadow-lg
+                ${cart.length === 0 ? 'bg-gray-400 cursor-not-allowed' : 'bg-slate-900 hover:bg-black'}
               `}
             >
-              {loading ? "Procesando..." : "COBRAR"}
+              {loading ? "..." : "COBRAR"}
             </button>
           </div>
         </div>
@@ -3312,14 +3916,13 @@ export default function ProductActions({ id, isActive, stock }: { id: string, is
 'use client'
 
 import { useState } from "react"
-import { createProduct, updateProduct } from "@/actions/product-actions" // 👈 Importamos update
+import { createProduct, updateProduct } from "@/actions/product-actions"
 import ImageUpload from "./ImageUpload"
-import { useRouter } from "next/navigation" // Para volver atrás después de editar
+import { useRouter } from "next/navigation"
 
 type Props = {
   owners: { id: string; name: string }[]
   categories: { id: string; name: string }[]
-  // 👇 NUEVO: Datos opcionales para edición
   initialData?: {
     id: string
     name: string
@@ -3335,21 +3938,43 @@ type Props = {
 export default function ProductForm({ owners, categories, initialData }: Props) {
   const router = useRouter()
   const [imageUrl, setImageUrl] = useState(initialData?.imageUrl || "")
+  const [loading, setLoading] = useState(false) // Feedback visual
   
-  // Función wrapper para manejar la redirección post-guardado si es edición
   const handleSubmit = async (formData: FormData) => {
+    setLoading(true)
+
+    // Agregamos la URL de la imagen manualmente al FormData si cambió
+    if (imageUrl) {
+        // Si el input file está vacío pero tenemos URL en el estado (por carga previa), aseguramos enviarla
+        // Nota: En este form simple confiamos en el input hidden, pero esto refuerza.
+    }
+
+    let result;
+
     if (initialData) {
         // MODO EDICIÓN
-        formData.append("id", initialData.id) // Agregamos el ID oculto
-        await updateProduct(formData)
-        alert("Producto actualizado correctamente")
-        router.push("/products") // Volver al listado
-        router.refresh() // Refrescar datos visuales
+        formData.append("id", initialData.id)
+        result = await updateProduct(formData)
+        
+        if (result?.success) {
+            alert("✅ Producto actualizado correctamente")
+            router.push("/products")
+            router.refresh()
+        } else {
+            alert("❌ Error al actualizar:\n" + result?.error)
+        }
+
     } else {
         // MODO CREACIÓN
-        await createProduct(formData)
-        // createProduct ya hace redirect, no hace falta lógica aquí
+        // createProduct hace redirect si todo sale bien. Si retorna algo, es un error.
+        result = await createProduct(formData)
+        
+        if (result?.error) {
+            alert("❌ No se pudo crear el producto:\n" + result.error)
+        }
     }
+    
+    setLoading(false)
   }
 
   return (
@@ -3365,10 +3990,10 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
           <label className="block text-sm font-medium text-gray-700">Nombre *</label>
           <input 
             name="name" 
-            defaultValue={initialData?.name} // 👈 Pre-carga
+            defaultValue={initialData?.name} 
             type="text" 
             required 
-            className="w-full border p-2 rounded" 
+            className="w-full border p-2 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
           />
         </div>
 
@@ -3378,7 +4003,7 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
           <textarea 
             name="description" 
             defaultValue={initialData?.description || ""} 
-            className="w-full border p-2 rounded" 
+            className="w-full border p-2 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
             rows={2} 
           />
         </div>
@@ -3391,7 +4016,7 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
               name="ownerId" 
               defaultValue={initialData?.ownerId || ""} 
               required 
-              className="w-full border p-2 rounded bg-white"
+              className="w-full border p-2 rounded bg-white focus:ring-2 focus:ring-blue-500 outline-none"
             >
               <option value="">Seleccionar...</option>
               {owners.map(o => (
@@ -3406,7 +4031,7 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
               name="categoryId" 
               defaultValue={initialData?.categoryId || ""} 
               required 
-              className="w-full border p-2 rounded bg-white"
+              className="w-full border p-2 rounded bg-white focus:ring-2 focus:ring-blue-500 outline-none"
             >
               <option value="">Seleccionar...</option>
               {categories.map(c => (
@@ -3417,28 +4042,36 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
         </div>
 
         {/* Precios */}
-        <div className="grid grid-cols-2 gap-4 bg-gray-50 p-4 rounded">
+        <div className="grid grid-cols-2 gap-4 bg-gray-50 p-4 rounded border">
           <div>
             <label className="block text-sm font-medium text-gray-700">Costo (Dueño) *</label>
-            <input 
-                name="costPrice" 
-                defaultValue={initialData?.costPrice} 
-                type="number" 
-                step="0.01" 
-                required 
-                className="w-full border p-2 rounded" 
-            />
+            <div className="relative">
+                <span className="absolute left-3 top-2 text-gray-500">$</span>
+                <input 
+                    name="costPrice" 
+                    defaultValue={initialData?.costPrice} 
+                    type="number" 
+                    step="0.01" 
+                    min="0"
+                    required 
+                    className="w-full border p-2 pl-7 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
+                />
+            </div>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700">Precio Venta *</label>
-            <input 
-                name="salePrice" 
-                defaultValue={initialData?.salePrice} 
-                type="number" 
-                step="0.01" 
-                required 
-                className="w-full border p-2 rounded" 
-            />
+            <div className="relative">
+                <span className="absolute left-3 top-2 text-gray-500">$</span>
+                <input 
+                    name="salePrice" 
+                    defaultValue={initialData?.salePrice} 
+                    type="number" 
+                    step="0.01" 
+                    min="0"
+                    required 
+                    className="w-full border p-2 pl-7 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
+                />
+            </div>
           </div>
         </div>
 
@@ -3454,11 +4087,250 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
           <input type="hidden" name="imageUrl" value={imageUrl} />
         </div>
 
-        <button type="submit" className="w-full bg-blue-600 text-white py-3 rounded hover:bg-blue-700 font-bold">
-          {initialData ? "Actualizar Cambios" : "Guardar Producto"}
+        <button 
+            type="submit" 
+            disabled={loading}
+            className={`w-full text-white py-3 rounded font-bold shadow transition
+                ${loading 
+                    ? 'bg-gray-400 cursor-not-allowed' 
+                    : 'bg-blue-600 hover:bg-blue-700 transform active:scale-95'
+                }
+            `}
+        >
+          {loading ? "Procesando..." : (initialData ? "Actualizar Cambios" : "Guardar Producto")}
         </button>
 
       </form>
+    </div>
+  )
+}
+
+--- File: ReceiptModal.tsx (in subfolder: components) ---
+
+// src/components/ReceiptModal.tsx
+'use client'
+
+import { useState } from "react"
+import TicketView from "./TicketView"
+
+type SaleData = {
+  id: string
+  total: number
+  paymentMethod: string
+  createdAt: Date
+  items: { description: string; quantity: number; priceAtSale: number }[]
+}
+
+export default function ReceiptModal({ sale }: { sale: SaleData }) {
+  const [isOpen, setIsOpen] = useState(false)
+
+  // Mapeamos los datos de DB a lo que espera el Ticket
+  const ticketItems = sale.items.map(i => ({
+    description: i.description,
+    quantity: i.quantity,
+    price: i.priceAtSale // El ticket espera 'price', la DB tiene 'priceAtSale'
+  }))
+
+  return (
+    <>
+      {/* EL BOTÓN ACTIVADOR */}
+      <button 
+        onClick={(e) => {
+            e.stopPropagation() // Evita que se cierre/abra el acordeón de la fila
+            setIsOpen(true)
+        }}
+        className="bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold px-3 py-1 rounded border border-gray-300 flex items-center gap-1 transition"
+      >
+        📄 Ver Ticket
+      </button>
+
+      {/* EL MODAL (Solo visible si isOpen === true) */}
+      {isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+            
+            {/* Contenedor del Ticket (Con scroll si es muy alto) */}
+            <div className="bg-transparent w-full max-w-lg max-h-screen overflow-y-auto">
+                <TicketView 
+                    mode="HISTORY"
+                    saleId={sale.id}
+                    date={sale.createdAt}
+                    items={ticketItems}
+                    total={sale.total}
+                    paymentMethod={sale.paymentMethod}
+                    onClose={() => setIsOpen(false)} // Cierra el modal
+                />
+            </div>
+
+        </div>
+      )}
+    </>
+  )
+}
+
+--- File: SaleRow.tsx (in subfolder: components) ---
+
+// src/components/SaleRow.tsx
+'use client'
+
+import { useState } from "react"
+import CancelSaleButton from "./CancelSaleButton"
+import ReceiptModal from "./ReceiptModal" // 👈 Importamos
+
+type SaleItem = {
+  description: string
+  quantity: number
+  priceAtSale: number 
+}
+
+type SaleData = {
+  id: string
+  total: number
+  paymentMethod: string
+  status: string
+  createdAt: Date
+  items: SaleItem[]
+}
+
+export default function SaleRow({ sale }: { sale: SaleData }) {
+  const [isOpen, setIsOpen] = useState(false)
+
+  const dateStr = sale.createdAt.toLocaleDateString()
+  const timeStr = sale.createdAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const isCancelled = sale.status === 'CANCELLED'
+
+  return (
+    <>
+      <tr 
+        onClick={() => setIsOpen(!isOpen)}
+        className={`cursor-pointer transition-colors border-b ${isCancelled ? 'bg-red-50 text-gray-500' : 'hover:bg-blue-50 bg-white'}`}
+      >
+        <td className="p-4 whitespace-nowrap">
+            <div className="flex flex-col">
+                <span className="font-bold text-gray-800">{dateStr}</span>
+                <span className="text-xs text-gray-500">{timeStr}</span>
+            </div>
+        </td>
+        
+        <td className="p-4">
+            <span className={`text-xs font-bold px-2 py-1 rounded border
+                ${sale.paymentMethod === 'CASH' ? 'bg-green-100 text-green-700 border-green-200' : 'bg-blue-100 text-blue-700 border-blue-200'}
+            `}>
+                {sale.paymentMethod === 'CASH' ? 'EFECTIVO' : 'TRANSFER.'}
+            </span>
+        </td>
+
+        <td className="p-4">
+            <div className="flex items-center gap-2">
+                <span className={`font-mono font-bold text-lg ${isCancelled ? 'line-through opacity-50' : 'text-gray-900'}`}>
+                    ${sale.total.toLocaleString()}
+                </span>
+                {isCancelled && <span className="text-xs text-red-600 font-bold bg-red-100 px-1 rounded">ANULADA</span>}
+            </div>
+        </td>
+
+        <td className="p-4 text-center">
+            <span className={`inline-block transition-transform ${isOpen ? 'rotate-180' : ''}`}>▼</span>
+        </td>
+      </tr>
+
+      {isOpen && (
+        <tr className="bg-gray-50 border-b">
+            <td colSpan={4} className="p-4 shadow-inner">
+                <div className="flex flex-col sm:flex-row justify-between items-start gap-4">
+                    
+                    <div className="space-y-2">
+                        <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Detalle de la venta:</p>
+                        <ul className="text-sm space-y-1">
+                            {sale.items.map((item, idx) => (
+                                <li key={idx} className="flex gap-2">
+                                    <span className="font-bold text-gray-700">{item.quantity} x</span>
+                                    <span>{item.description}</span>
+                                    <span className="text-gray-400">(${Number(item.priceAtSale).toLocaleString()} c/u)</span>
+                                </li>
+                            ))}
+                        </ul>
+                        <p className="text-xs text-gray-400 mt-2 font-mono">ID: {sale.id}</p>
+                    </div>
+
+                    <div className="flex flex-col gap-2 items-end">
+                        
+                        {/* 👇 AQUÍ AGREGAMOS EL BOTÓN DE TICKET */}
+                        <ReceiptModal sale={sale} />
+
+                        {!isCancelled && (
+                            <>
+                                <CancelSaleButton saleId={sale.id} />
+                                <p className="text-[10px] text-red-500 max-w-[150px] leading-tight text-right">
+                                    ⚠️ Anular restaura stock y ajusta deuda.
+                                </p>
+                            </>
+                        )}
+                    </div>
+                </div>
+            </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+--- File: SearchInput.tsx (in subfolder: components) ---
+
+// src/components/SearchInput.tsx
+'use client'
+
+import { useSearchParams, usePathname, useRouter } from 'next/navigation'
+import { useDebouncedCallback } from 'use-debounce' // Opcional, pero haremos una versión nativa para no obligarte a instalar librerías extra hoy.
+
+export default function SearchInput({ placeholder }: { placeholder: string }) {
+  const searchParams = useSearchParams()
+  const pathname = usePathname()
+  const { replace } = useRouter()
+
+  // Función para manejar el cambio en el input con un pequeño retraso (Debounce manual)
+  const handleSearch = (term: string) => {
+    const params = new URLSearchParams(searchParams)
+    
+    if (term) {
+      params.set('query', term)
+    } else {
+      params.delete('query')
+    }
+    
+    // replace actualiza la URL sin agregar una entrada al historial del navegador
+    replace(`${pathname}?${params.toString()}`)
+  }
+
+  return (
+    <div className="relative flex flex-1 flex-shrink-0">
+      <label htmlFor="search" className="sr-only">
+        Buscar
+      </label>
+      <input
+        className="peer block w-full rounded-md border border-gray-200 py-[9px] pl-10 text-sm outline-2 placeholder:text-gray-500 focus:border-blue-500 focus:ring-blue-500"
+        placeholder={placeholder}
+        onChange={(e) => {
+            // Un pequeño debounce nativo usando timeout si escriben muy rápido
+            // Nota: En producción idealmente usamos una librería como 'use-debounce'
+            handleSearch(e.target.value) 
+        }}
+        defaultValue={searchParams.get('query')?.toString()}
+      />
+      {/* Icono de Lupa (SVG) */}
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        fill="none"
+        viewBox="0 0 24 24"
+        strokeWidth={1.5}
+        stroke="currentColor"
+        className="absolute left-3 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-gray-500 peer-focus:text-gray-900"
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
+        />
+      </svg>
     </div>
   )
 }
@@ -3501,6 +4373,288 @@ export default function SettlementButton() {
   )
 }
 
+--- File: StockMovementForm.tsx (in subfolder: components) ---
+
+// src/components/StockMovementForm.tsx
+'use client'
+
+import { useState } from "react"
+import { registerStockMovement } from "@/actions/inventory-actions"
+import { useRouter } from "next/navigation"
+
+type ProductOption = {
+  variantId: string
+  productName: string
+  ownerName: string
+  stock: number
+}
+
+export default function StockMovementForm({ products }: { products: ProductOption[] }) {
+  const [loading, setLoading] = useState(false)
+  const router = useRouter()
+
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    setLoading(true)
+
+    const form = e.currentTarget
+    const formData = new FormData(form)
+
+    const result = await registerStockMovement(formData)
+
+    if (result.success) {
+      alert("✅ Movimiento registrado correctamente")
+      form.reset() // Limpiamos campos
+      router.refresh() // Refrescamos datos de fondo
+      router.push("/products") // Redirigimos al inventario
+    } else {
+      alert("❌ ERROR: " + result.error)
+    }
+
+    setLoading(false)
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-6">
+          
+      {/* SELECCIÓN DE TIPO DE MOVIMIENTO */}
+      <div className="flex flex-col gap-3">
+        <label className="block text-sm font-medium text-gray-700">Tipo de Acción</label>
+        
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4 bg-gray-50 rounded border">
+            {/* Opción 1: Ingreso */}
+            <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-white rounded border border-transparent hover:border-green-200 transition">
+                <input type="radio" name="type" value="ENTRY" defaultChecked className="w-5 h-5 text-green-600 focus:ring-green-500" />
+                <span className="font-bold text-green-700 text-sm">🟢 Ingreso <br/><span className="text-xs font-normal text-gray-500">Nuevo stock</span></span>
+            </label>
+
+            {/* Opción 2: Retiro Dueño */}
+            <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-white rounded border border-transparent hover:border-orange-200 transition">
+                <input type="radio" name="type" value="OWNER_WITHDRAWAL" className="w-5 h-5 text-orange-600 focus:ring-orange-500" />
+                <span className="font-bold text-orange-700 text-sm">🟠 Retiro Dueño <br/><span className="text-xs font-normal text-gray-500">Devolución</span></span>
+            </label>
+
+            {/* Opción 3: Ajuste/Rotura */}
+            <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-white rounded border border-transparent hover:border-red-200 transition">
+                <input type="radio" name="type" value="ADJUSTMENT" className="w-5 h-5 text-red-600 focus:ring-red-500" />
+                <span className="font-bold text-red-700 text-sm">🔴 Baja / Rotura <br/><span className="text-xs font-normal text-gray-500">Pérdida</span></span>
+            </label>
+        </div>
+      </div>
+
+      {/* SELECCIÓN DE PRODUCTO */}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Producto</label>
+        <select 
+            name="variantId" 
+            required 
+            className="w-full border p-3 rounded bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+        >
+          <option value="">Seleccionar producto...</option>
+          {products.map(p => (
+            <option key={p.variantId} value={p.variantId}>
+              {p.productName} (Stock: {p.stock}) - Dueño: {p.ownerName}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* CANTIDAD */}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Cantidad (Unidades)</label>
+        <input 
+          name="quantity" 
+          type="number" 
+          min="1" 
+          required 
+          className="w-full border p-3 rounded text-lg font-bold focus:ring-2 focus:ring-blue-500 outline-none" 
+          placeholder="Ej: 5"
+        />
+      </div>
+
+      {/* MOTIVO */}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Nota / Motivo (Opcional)</label>
+        <input 
+          name="reason" 
+          type="text" 
+          className="w-full border p-3 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
+          placeholder="Ej: Remito #1234 / Se rompió al limpiar"
+        />
+      </div>
+
+      <button 
+        type="submit" 
+        disabled={loading}
+        className={`w-full py-3 rounded text-white font-bold text-lg shadow-lg transform transition 
+            ${loading 
+                ? 'bg-slate-400 cursor-wait' 
+                : 'bg-slate-800 hover:bg-slate-900 hover:scale-[1.02] active:scale-95'
+            }
+        `}
+      >
+        {loading ? "Procesando..." : "Confirmar Movimiento"}
+      </button>
+
+    </form>
+  )
+}
+
+--- File: TicketView.tsx (in subfolder: components) ---
+
+// src/components/TicketView.tsx
+'use client'
+
+import { useState, useRef } from "react"
+import jsPDF from "jspdf"
+import html2canvas from "html2canvas"
+
+type TicketProps = {
+  saleId: string
+  date: Date
+  items: { description: string; quantity: number; price: number }[]
+  total: number
+  paymentMethod: string
+  onClose: () => void // 👈 Renombramos onNewSale a onClose para que sea genérico
+  mode?: 'POS' | 'HISTORY' // 👈 Nuevo: Para saber qué texto mostrar
+}
+
+export default function TicketView({ saleId, date, items, total, paymentMethod, onClose, mode = 'POS' }: TicketProps) {
+  const [downloading, setDownloading] = useState(false)
+  const ticketRef = useRef<HTMLDivElement>(null)
+
+  const handleDownloadPDF = async () => {
+    const element = ticketRef.current
+    if (!element) return
+
+    setDownloading(true)
+
+    try {
+      const canvas = await html2canvas(element, {
+        scale: 2,
+        backgroundColor: "#ffffff",
+        logging: false,
+        useCORS: true,
+        onclone: (documentClone) => {
+            const el = documentClone.getElementById('printable-ticket')
+            if (el) {
+                el.style.backgroundColor = "#ffffff"
+                el.style.color = "#000000"
+            }
+        }
+      })
+
+      const imgData = canvas.toDataURL('image/png')
+      const pdf = new jsPDF('p', 'mm', 'a4')
+      
+      const pdfWidth = pdf.internal.pageSize.getWidth()
+      const imgWidth = canvas.width
+      const imgHeight = canvas.height
+      
+      const margin = 20
+      const finalWidth = pdfWidth - (margin * 2)
+      const finalHeight = (imgHeight * finalWidth) / imgWidth
+
+      pdf.addImage(imgData, 'PNG', margin, 20, finalWidth, finalHeight)
+      pdf.save(`Ticket_${saleId.slice(0, 8)}.pdf`)
+
+    } catch (error: any) {
+      console.error("Error PDF:", error)
+      alert("Error al crear PDF.")
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-center justify-center h-full p-4 animate-in zoom-in-95 duration-300 w-full">
+        
+        {/* TICKET VISUAL */}
+        <div 
+            id="printable-ticket"
+            ref={ticketRef} 
+            className="p-10 rounded-none shadow-xl border w-full max-w-md relative overflow-hidden bg-white text-black"
+            style={{ backgroundColor: "#ffffff", color: "#000000" }}
+        >
+            <div className="text-center mb-8 border-b-2 pb-4" style={{ borderColor: "#1e293b" }}>
+                <h2 className="text-3xl font-black tracking-tighter" style={{ color: "#1e293b" }}>GUAPECANES</h2>
+                <p className="text-xs uppercase tracking-[0.3em] mt-1" style={{ color: "#64748b" }}>
+                    {mode === 'POS' ? 'Comprobante de Venta' : 'Copia de Comprobante'}
+                </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 text-sm mb-6" style={{ color: "#475569" }}>
+                <div>
+                    <p className="font-bold text-xs uppercase" style={{ color: "#94a3b8" }}>Fecha</p>
+                    <p>{new Date(date).toLocaleDateString()}</p>
+                </div>
+                <div className="text-right">
+                    <p className="font-bold text-xs uppercase" style={{ color: "#94a3b8" }}>Hora</p>
+                    <p>{new Date(date).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</p>
+                </div>
+                <div>
+                    <p className="font-bold text-xs uppercase" style={{ color: "#94a3b8" }}>ID Operación</p>
+                    <p className="font-mono text-xs">{saleId.slice(0,8)}</p>
+                </div>
+                <div className="text-right">
+                    <p className="font-bold text-xs uppercase" style={{ color: "#94a3b8" }}>Pago</p>
+                    <p>{paymentMethod === 'CASH' ? 'Efectivo' : 'Transferencia'}</p>
+                </div>
+            </div>
+
+            <table className="w-full text-sm mb-6">
+                <thead>
+                    <tr className="border-b-2 text-xs uppercase" style={{ borderColor: "#f1f5f9", color: "#94a3b8" }}>
+                        <th className="text-left py-2">Item</th>
+                        <th className="text-right py-2">Total</th>
+                    </tr>
+                </thead>
+                <tbody className="font-medium">
+                    {items.map((item, i) => (
+                        <tr key={i} className="border-b" style={{ borderColor: "#f8fafc" }}>
+                            <td className="py-2">
+                                <span className="font-bold mr-2">{item.quantity}x</span>
+                                {item.description}
+                            </td>
+                            <td className="py-2 text-right">${(item.price * item.quantity).toLocaleString()}</td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+
+            <div className="p-4 rounded-lg flex justify-between items-center" style={{ backgroundColor: "#f8fafc" }}>
+                <span className="text-sm font-bold uppercase" style={{ color: "#64748b" }}>Total a Pagar</span>
+                <span className="text-3xl font-black" style={{ color: "#0f172a" }}>${total.toLocaleString()}</span>
+            </div>
+            
+            <div className="mt-8 text-center text-[10px]" style={{ color: "#94a3b8" }}>
+               <p>Documento generado electrónicamente.</p>
+            </div>
+        </div>
+
+        {/* BOTONERA */}
+        <div className="mt-8 flex flex-col gap-3 w-full max-w-sm">
+            <button 
+                onClick={handleDownloadPDF}
+                disabled={downloading}
+                className={`w-full py-4 rounded-lg font-bold flex items-center justify-center gap-2 shadow-lg transition text-white
+                    ${downloading ? 'bg-slate-400 cursor-wait' : 'bg-red-600 hover:bg-red-700'}
+                `}
+            >
+                {downloading ? "Generando PDF..." : "📥 Descargar Comprobante"}
+            </button>
+
+            <button 
+                onClick={onClose}
+                className="w-full bg-slate-900 hover:bg-black text-white font-bold py-4 rounded-lg mt-2 shadow transition"
+            >
+                {mode === 'POS' ? '✨ Nueva Venta' : 'Cerrar Vista'}
+            </button>
+        </div>
+    </div>
+  )
+}
+
 --- File: prisma.ts (in subfolder: lib) ---
 
 // src/lib/prisma.ts
@@ -3518,31 +4672,52 @@ if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
 
 /**
  * Devuelve la fecha actual en Argentina (GMT-3) en formato YYYY-MM-DD.
- * Funciona igual en Vercel, Railway o tu PC local.
+ * Útil para inputs type="date".
  */
 export function getLocalDateISO() {
   const now = new Date()
   
-  // 1. Obtenemos el tiempo UTC puro en milisegundos
-  const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000)
+  // Ajuste manual a GMT-3 (Argentina)
+  // getTimezoneOffset() devuelve minutos. Argentina es UTC-3 (180 min).
+  // Pero para estar 100% seguros independientemente del servidor, forzamos el cálculo:
+  const ARGENTINA_OFFSET = -3 * 60 * 60 * 1000 // -3 horas en milisegundos
   
-  // 2. Restamos 3 horas (Offset Argentina)
-  const ARGENTINA_OFFSET = -3
-  const argentinaTime = new Date(utcTime + (3600000 * ARGENTINA_OFFSET))
+  // Obtenemos el tiempo UTC actual y le restamos 3 horas
+  const utc = now.getTime() + (now.getTimezoneOffset() * 60000)
+  const argentinaTime = new Date(utc + ARGENTINA_OFFSET)
   
-  // 3. Formateamos a ISO (Al haber ajustado el tiempo manualmente, el ISO sale con el día correcto)
   return argentinaTime.toISOString().split('T')[0]
 }
 
 /**
- * Devuelve objetos Date de inicio y fin del día LOCAL
+ * Convierte un string "YYYY-MM-DD" y una hora "HH:MM" en un objeto Date
+ * que representa ese momento EXACTO en Argentina (GMT-3).
+ * El servidor lo guardará como UTC, pero el punto en el tiempo será el correcto.
  */
-export function getLocalDayRange(dateStr?: string) {
+export function buildArgentinaDate(dateStr: string, timeStr: string = "00:00:00"): Date {
+    // Si timeStr viene solo como "14:30", le agregamos segundos para cumplir formato ISO
+    const timeFull = timeStr.length === 5 ? `${timeStr}:00` : timeStr
+    
+    // Construimos ISO forzando el offset "-03:00"
+    const isoString = `${dateStr}T${timeFull}-03:00`
+    
+    return new Date(isoString)
+}
+
+/**
+ * Devuelve el rango de inicio y fin de un día en Argentina.
+ * Útil para filtros de base de datos (Prisma gte/lte).
+ */
+export function getArgentinaDayRange(dateStr?: string) {
     const targetDate = dateStr || getLocalDateISO()
     
-    // Al agregar la hora explícita T00:00:00, JS entiende que es hora LOCAL del sistema, no UTC.
-    const start = new Date(`${targetDate}T00:00:00`)
-    const end = new Date(`${targetDate}T23:59:59`)
+    // Inicio del día: 00:00:00.000
+    const start = buildArgentinaDate(targetDate, "00:00:00")
+    
+    // Fin del día: 23:59:59.999
+    // Nota: Usamos buildArgentinaDate base y ajustamos manual o pasamos hora final
+    // Para mayor precisión, seteamos la hora final
+    const end = new Date(buildArgentinaDate(targetDate, "23:59:59").getTime() + 999)
     
     return { start, end, dateStr: targetDate }
 }

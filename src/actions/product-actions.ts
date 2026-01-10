@@ -6,27 +6,40 @@ import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
 export async function createProduct(formData: FormData) {
-  // 1. Obtener datos simples
+  // 1. Obtener datos
   const name = formData.get("name") as string
   const description = formData.get("description") as string
   const ownerId = formData.get("ownerId") as string
   const categoryId = formData.get("categoryId") as string
-  const imageUrl = formData.get("imageUrl") as string // URL de Cloudinary
+  const imageUrl = formData.get("imageUrl") as string 
   
-  // 2. Obtener y convertir números (Prisma usa Strings para Decimals, pero validamos aquí)
+  // Convertir números
   const costPrice = parseFloat(formData.get("costPrice") as string)
   const salePrice = parseFloat(formData.get("salePrice") as string)
 
-  // Validaciones básicas
-  if (!name || !ownerId || !categoryId || !costPrice || !salePrice) {
-    throw new Error("Faltan datos obligatorios")
+  // 2. VALIDACIONES DE SISTEMA
+  if (!name || !ownerId || !categoryId) {
+    return { error: "Faltan datos obligatorios (Nombre, Dueño o Categoría)" }
+  }
+
+  if (isNaN(costPrice) || isNaN(salePrice)) {
+    return { error: "Los precios deben ser números válidos." }
+  }
+
+  // 3. VALIDACIONES DE NEGOCIO (Reglas de Oro)
+  if (costPrice < 0 || salePrice < 0) {
+    return { error: "Los precios no pueden ser negativos." }
+  }
+
+  // Regla: No vender a pérdida (salvo excepciones, pero por defecto protegemos)
+  if (salePrice < costPrice) {
+    return { error: `ERROR DE RENTABILIDAD: Estás vendiendo a $${salePrice} algo que costó $${costPrice}.` }
   }
 
   try {
-    // 3. LA TRANSACCIÓN (Todo o Nada)
+    // 4. LA TRANSACCIÓN
     await prisma.$transaction(async (tx) => {
-      
-      // A. Crear el "Padre" (Producto genérico)
+      // A. Crear Producto
       const newProduct = await tx.product.create({
         data: {
           name,
@@ -37,33 +50,29 @@ export async function createProduct(formData: FormData) {
         }
       })
 
-      // B. Crear el "Hijo" (Variante inicial)
-      // Usamos el ID del padre que acabamos de crear (newProduct.id)
+      // B. Crear Variante Inicial (Stock 0 siempre)
       await tx.productVariant.create({
         data: {
           productId: newProduct.id,
-          name: "Estándar", // Por ahora, variante única por defecto
+          name: "Estándar",
           imageUrl: imageUrl || null,
           costPrice: costPrice,
           salePrice: salePrice,
-          stock: 0 // Regla de oro: Nace con stock 0. Se carga después.
+          stock: 0 
         }
       })
     })
 
-    // 4. Si todo salió bien
     revalidatePath("/products")
 
   } catch (error) {
     console.error("Error creando producto:", error)
-    return { error: "Error al guardar el producto" }
+    return { error: "Error interno al guardar el producto." }
   }
   
-  // Redirigir al listado (fuera del try/catch)
+  // 5. Redirección exitosa (fuera del try/catch)
   redirect("/products")
 }
-
-// --- AGREGAR AL FINAL DE src/actions/product-actions.ts ---
 
 export async function updateProduct(formData: FormData) {
   const id = formData.get("id") as string
@@ -71,22 +80,27 @@ export async function updateProduct(formData: FormData) {
   const description = formData.get("description") as string
   const categoryId = formData.get("categoryId") as string
   const ownerId = formData.get("ownerId") as string
+  const imageUrl = formData.get("imageUrl") as string
+  
   const costPrice = parseFloat(formData.get("costPrice") as string)
   const salePrice = parseFloat(formData.get("salePrice") as string)
-  const imageUrl = formData.get("imageUrl") as string
 
-  if (!id || !name || !costPrice || !salePrice) throw new Error("Datos faltantes")
+  if (!id || !name) return { error: "Datos faltantes" }
+
+  // Validaciones de Negocio también al editar
+  if (isNaN(costPrice) || isNaN(salePrice)) return { error: "Precios inválidos" }
+  if (costPrice < 0 || salePrice < 0) return { error: "Precios negativos no permitidos" }
+  if (salePrice < costPrice) return { error: `Rentabilidad negativa: Costo $${costPrice} > Venta $${salePrice}` }
 
   try {
     await prisma.$transaction(async (tx) => {
-      // 1. Actualizar datos base del producto
+      // 1. Actualizar producto base
       await tx.product.update({
         where: { id },
         data: { name, description, categoryId, ownerId }
       })
 
-      // 2. Actualizar precios en la variante (Asumimos variante única por ahora)
-      // Primero buscamos la variante asociada a este producto
+      // 2. Actualizar precios en la variante
       const variant = await tx.productVariant.findFirst({ where: { productId: id } })
       
       if (variant) {
@@ -95,7 +109,6 @@ export async function updateProduct(formData: FormData) {
           data: {
             costPrice,
             salePrice,
-            // Si viene una imagen nueva, la actualizamos. Si viene vacía, NO la tocamos (mantenemos la vieja)
             ...(imageUrl ? { imageUrl } : {}) 
           }
         })
@@ -103,7 +116,7 @@ export async function updateProduct(formData: FormData) {
     })
 
     revalidatePath("/products")
-    revalidatePath("/pos") // Importante: actualizar precios en el punto de venta
+    revalidatePath("/pos") 
     return { success: true }
 
   } catch (error) {
@@ -115,7 +128,7 @@ export async function updateProduct(formData: FormData) {
 export async function toggleProductStatus(productId: string, currentStatus: boolean) {
   try {
     // REGLA DE ORO: No archivar si hay stock positivo
-    if (currentStatus === true) { // Si queremos desactivar...
+    if (currentStatus === true) { 
       const variant = await prisma.productVariant.findFirst({ where: { productId } })
       if (variant && variant.stock > 0) {
         return { error: "No se puede archivar un producto con stock. Hacé un retiro o ajuste a 0 primero." }

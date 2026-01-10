@@ -8,48 +8,39 @@ import { redirect } from "next/navigation"
 export async function createSettlement(formData: FormData) {
   const ownerId = formData.get("ownerId") as string
   
-  if (!ownerId) throw new Error("ID de dueño requerido")
+  if (!ownerId) return { error: "ID de dueño requerido" }
 
   try {
-    // 1. SEGURIDAD: Recalculamos todo en el servidor.
-    
-    // A. Buscar Ventas Pendientes (Suman deuda)
+    // 1. Recalcular deuda en el servidor (Fuente de la verdad)
+    // No confiamos en lo que diga el frontend, recalculamos aquí.
     const pendingItems = await prisma.saleItem.findMany({
       where: {
         isSettled: false,
-        variant: {
-          product: { ownerId: ownerId }
-        }
+        variant: { product: { ownerId: ownerId } }
       }
     })
 
-    // B. Buscar Ajustes Pendientes (Restan deuda, generalmente)
     const pendingAdjustments = await prisma.balanceAdjustment.findMany({
-      where: {
-        ownerId: ownerId,
-        isApplied: false
-      }
+      where: { ownerId: ownerId, isApplied: false }
     })
 
-    if (pendingItems.length === 0 && pendingAdjustments.length === 0) {
-      return { error: "No hay movimientos pendientes para liquidar." }
+    // 2. Sumas
+    const debtFromSales = pendingItems.reduce((sum, item) => sum + (Number(item.costAtSale) * item.quantity), 0)
+    const debtFromAdj = pendingAdjustments.reduce((sum, adj) => sum + Number(adj.amount), 0)
+    
+    const totalToPay = debtFromSales + debtFromAdj
+
+    // 3. VALIDACIÓN DE NEGOCIO (Blindaje)
+    // Solo permitimos liquidar si efectivamente le debemos plata al dueño.
+    if (totalToPay <= 0) {
+        return { 
+            error: `No se puede liquidar. El saldo es $${totalToPay.toLocaleString()}. Solo se registran pagos cuando hay deuda a favor del dueño.` 
+        }
     }
 
-    // 2. Calcular Totales
-    const totalSales = pendingItems.reduce((sum, item) => {
-      return sum + (Number(item.costAtSale) * item.quantity)
-    }, 0)
-
-    const totalAdjustments = pendingAdjustments.reduce((sum, adj) => {
-      return sum + Number(adj.amount)
-    }, 0)
-
-    // Total Neto (Suma algebraica)
-    const totalToPay = totalSales + totalAdjustments
-
-    // 3. TRANSACCIÓN ATÓMICA
+    // 4. TRANSACCIÓN
     await prisma.$transaction(async (tx) => {
-      // A. Crear la Cabecera ("El Recibo")
+      // A. Crear Recibo
       const newSettlement = await tx.settlement.create({
         data: {
           ownerId,
@@ -61,10 +52,7 @@ export async function createSettlement(formData: FormData) {
       if (pendingItems.length > 0) {
         await tx.saleItem.updateMany({
           where: { id: { in: pendingItems.map(i => i.id) } },
-          data: {
-            isSettled: true,
-            settlementId: newSettlement.id
-          }
+          data: { isSettled: true, settlementId: newSettlement.id }
         })
       }
 
@@ -72,20 +60,26 @@ export async function createSettlement(formData: FormData) {
       if (pendingAdjustments.length > 0) {
         await tx.balanceAdjustment.updateMany({
             where: { id: { in: pendingAdjustments.map(a => a.id) } },
-            data: {
-                isApplied: true,
-                settlementId: newSettlement.id
-            }
+            data: { isApplied: true, settlementId: newSettlement.id }
         })
       }
     })
 
     revalidatePath("/owners/balance")
+    revalidatePath(`/owners/settlement/${ownerId}`)
+    revalidatePath(`/owners/${ownerId}`)
 
+    // Nota: No hacemos redirect aquí para poder retornar el objeto { success: true }
+    // El componente cliente (SettlementButton) debería manejar la navegación si lo desea,
+    // o simplemente mostrar un éxito. 
+    // Como SettlementButton es un botón simple dentro de un form action tradicional,
+    // haremos un redirect exitoso a la lista general.
+    
   } catch (error) {
     console.error("Error en liquidación:", error)
-    return { error: "Error al procesar el pago." }
+    return { error: "Error interno al procesar el pago." }
   }
 
+  // Éxito: Volvemos al balance general
   redirect("/owners/balance")
 }

@@ -50,9 +50,14 @@ model Owner {
   email              String?
   isActive           Boolean   @default(true) 
   createdAt          DateTime  @default(now())
+  
   products           Product[]
   settlements        Settlement[]
   balanceAdjustments BalanceAdjustment[] 
+
+  // ⚡ ÍNDICES: Para búsquedas rápidas de dueños
+  @@index([name])
+  @@index([email])
 }
 
 model Category {
@@ -65,13 +70,18 @@ model Product {
   id          String    @id @default(uuid())
   name        String
   description String?
-  tags        String[]  // Indexar GIN
+  tags        String[]  // Indexar GIN (avanzado, por ahora array simple)
   ownerId     String
   owner       Owner     @relation(fields: [ownerId], references: [id])
   categoryId  String
   category    Category  @relation(fields: [categoryId], references: [id])
   variants    ProductVariant[]
   isActive    Boolean   @default(true)
+
+  // ⚡ ÍNDICES: Para buscar productos por nombre y filtrar por dueño/categoría
+  @@index([name])
+  @@index([ownerId])
+  @@index([categoryId])
 }
 
 model ProductVariant {
@@ -89,7 +99,10 @@ model ProductVariant {
   stockMovements StockMovement[]
   saleItems      SaleItem[]
 
+  // Constraint: No duplicar variante en mismo producto
   @@unique([productId, name]) 
+  // ⚡ ÍNDICES: Para control de stock rápido
+  @@index([productId])
 }
 
 // --- INVENTARIO ---
@@ -102,6 +115,10 @@ model StockMovement {
   reason      String?
   userId      String            // Auditoría
   createdAt   DateTime          @default(now())
+
+  // ⚡ ÍNDICES: Para historial y auditoría
+  @@index([variantId])
+  @@index([createdAt])
 }
 
 // --- VENTAS ---
@@ -112,6 +129,10 @@ model Sale {
   status        String        @default("COMPLETED") // COMPLETED, CANCELLED
   createdAt     DateTime      @default(now())
   items         SaleItem[]
+
+  // ⚡ ÍNDICES: Para reportes de caja por fecha
+  @@index([createdAt])
+  @@index([status])
 }
 
 model SaleItem {
@@ -131,6 +152,11 @@ model SaleItem {
   isSettled     Boolean        @default(false) 
   settlementId  String?
   settlement    Settlement?    @relation(fields: [settlementId], references: [id])
+
+  // ⚡ ÍNDICES: Crítico para calcular deudas (Liquidaciones)
+  @@index([saleId])
+  @@index([isSettled])
+  @@index([variantId])
 }
 
 // --- FINANZAS (RENDICIONES) ---
@@ -142,6 +168,9 @@ model Settlement {
   createdAt   DateTime @default(now())
   items       SaleItem[]
   adjustments BalanceAdjustment[]
+
+  @@index([ownerId])
+  @@index([createdAt])
 }
 
 model BalanceAdjustment {
@@ -154,6 +183,9 @@ model BalanceAdjustment {
   settlementId String?
   settlement   Settlement? @relation(fields: [settlementId], references: [id])
   createdAt    DateTime    @default(now())
+
+  @@index([ownerId])
+  @@index([isApplied])
 }
 
 // --- SERVICIOS ---
@@ -166,6 +198,9 @@ model Pet {
   notes       String?  // Notas generales
   appointments Appointment[]
   groomingNotes GroomingNote[]
+
+  @@index([name])
+  @@index([ownerName])
 }
 
 model Appointment {
@@ -176,6 +211,11 @@ model Appointment {
   endTime   DateTime
   status    ApptStatus @default(PENDING)
   price     Decimal?   @db.Decimal(10, 2)
+
+  // ⚡ ÍNDICES: Crítico para la Agenda (Range queries)
+  @@index([startTime])
+  @@index([endTime])
+  @@index([status])
 }
 
 model GroomingNote {

@@ -3,46 +3,54 @@
 
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
-import { redirect } from "next/navigation"
+import { buildArgentinaDate } from "@/lib/utils" // 👈 Importamos
+
+type ApptStatus = 'PENDING' | 'CONFIRMED' | 'COMPLETED' | 'BILLED' | 'CANCELLED'
 
 export async function createAppointment(formData: FormData) {
   const petId = formData.get("petId") as string
   const dateStr = formData.get("date") as string // "2024-01-20"
   const timeStr = formData.get("time") as string // "14:30"
-  const duration = parseInt(formData.get("duration") as string) || 60 // Minutos
+  const duration = parseInt(formData.get("duration") as string) || 60 
 
   if (!petId || !dateStr || !timeStr) {
     return { error: "Faltan datos (Mascota, Fecha u Hora)" }
   }
 
   try {
-    // 1. CONSTRUIR FECHAS (Start y End)
-    // Combinamos fecha y hora en un objeto Date
-    const startTime = new Date(`${dateStr}T${timeStr}:00`)
-    // Calculamos el final sumando minutos
+    // 1. CONSTRUIR FECHAS (Usando utilidad centralizada)
+    const startTime = buildArgentinaDate(dateStr, timeStr)
+    
+    // Calculamos el final
     const endTime = new Date(startTime.getTime() + duration * 60000)
 
-    // Validar que sea una fecha válida
     if (isNaN(startTime.getTime())) {
       return { error: "Fecha u hora inválida" }
     }
 
-    // 2. VALIDAR COLISIONES (La Regla de Oro)
-    // Buscamos si existe algún turno que NO esté cancelado Y que se superponga
+    // 2. VALIDAR COLISIONES
     const collision = await prisma.appointment.findFirst({
       where: {
-        status: { not: 'CANCELLED' }, // Ignoramos los cancelados
+        status: { not: 'CANCELLED' }, 
         AND: [
-          { startTime: { lt: endTime } }, // Que empiece antes de que yo termine
-          { endTime: { gt: startTime } }  // Y que termine después de que yo empiece
+          { startTime: { lt: endTime } }, 
+          { endTime: { gt: startTime } }  
         ]
       },
       include: { pet: true }
     })
 
     if (collision) {
+        // Formateamos para el mensaje de error
+        const collisionStart = collision.startTime.toLocaleTimeString('es-AR', {
+            hour: '2-digit', minute:'2-digit', timeZone: 'America/Argentina/Buenos_Aires'
+        })
+        const collisionEnd = collision.endTime.toLocaleTimeString('es-AR', {
+            hour: '2-digit', minute:'2-digit', timeZone: 'America/Argentina/Buenos_Aires'
+        })
+
       return { 
-        error: `Horario ocupado por ${collision.pet.name} (${collision.startTime.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} - ${collision.endTime.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})})` 
+        error: `Horario ocupado por ${collision.pet.name} (${collisionStart} - ${collisionEnd})` 
       }
     }
 
@@ -57,6 +65,7 @@ export async function createAppointment(formData: FormData) {
     })
 
     revalidatePath("/agenda")
+    revalidatePath("/dashboard")
     return { success: true }
 
   } catch (error) {
@@ -73,7 +82,23 @@ export async function cancelAppointment(formData: FormData) {
             data: { status: 'CANCELLED' }
         })
         revalidatePath("/agenda")
+        revalidatePath("/dashboard")
     } catch (error) {
         console.error(error)
+    }
+}
+
+export async function updateAppointmentStatus(id: string, newStatus: ApptStatus) {
+    try {
+        await prisma.appointment.update({
+            where: { id },
+            data: { status: newStatus }
+        })
+        revalidatePath("/agenda")
+        revalidatePath("/dashboard")
+        return { success: true }
+    } catch (error) {
+        console.error("Error cambiando estado:", error)
+        return { error: "No se pudo actualizar el estado" }
     }
 }

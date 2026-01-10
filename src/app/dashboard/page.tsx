@@ -6,17 +6,16 @@ import { getLocalDateISO } from "@/lib/utils"
 export default async function DashboardPage() {
   const now = new Date()
   
-  // Rango Mes (Estándar)
   const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
   const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1)
 
-  // Rango Hoy (Ajustado a Argentina)
   const todayStr = getLocalDateISO() 
-  // Al agregar T00:00:00, forzamos al servidor a tratarlo como el inicio del día local
   const startOfToday = new Date(`${todayStr}T00:00:00`)
   const endOfToday = new Date(`${todayStr}T23:59:59`)
 
+  // Consultas Paralelas
   const [monthSales, todaySales, todayAppointments, lowStockVariants] = await Promise.all([
+    // Ventas Mes
     prisma.sale.findMany({
       where: {
         status: "COMPLETED",
@@ -24,12 +23,14 @@ export default async function DashboardPage() {
       },
       include: { items: true }
     }),
+    // Ventas Hoy (Necesitamos saber el paymentMethod)
     prisma.sale.findMany({
       where: {
         status: "COMPLETED",
         createdAt: { gte: startOfToday, lte: endOfToday }
       }
     }),
+    // Turnos Hoy
     prisma.appointment.findMany({
       where: {
         startTime: { gte: startOfToday, lte: endOfToday },
@@ -38,6 +39,7 @@ export default async function DashboardPage() {
       include: { pet: true },
       orderBy: { startTime: 'asc' }
     }),
+    // Stock Bajo
     prisma.productVariant.findMany({
       where: { stock: { lte: 3 } },
       include: { product: true },
@@ -46,7 +48,7 @@ export default async function DashboardPage() {
     })
   ])
 
-  // Cálculos
+  // Cálculos Mensuales
   let monthRevenue = 0
   let monthCost = 0
   monthSales.forEach(sale => {
@@ -55,36 +57,68 @@ export default async function DashboardPage() {
   })
   const monthProfit = monthRevenue - monthCost
   const monthMargin = monthRevenue > 0 ? (monthProfit / monthRevenue) * 100 : 0
-  const todayRevenue = todaySales.reduce((sum, sale) => sum + Number(sale.total), 0)
-  const todayTransactions = todaySales.length
+
+  // Cálculos Diarios (Desglose por Medio de Pago)
+  const todayStats = {
+    total: 0,
+    cash: 0,
+    digital: 0, // Transfer + Tarjetas
+    transactions: todaySales.length
+  }
+
+  todaySales.forEach(sale => {
+    const amount = Number(sale.total)
+    todayStats.total += amount
+    if (sale.paymentMethod === 'CASH') {
+        todayStats.cash += amount
+    } else {
+        todayStats.digital += amount
+    }
+  })
 
   return (
     <div className="p-8 max-w-7xl mx-auto">
       <h1 className="text-3xl font-bold text-gray-800 mb-2">Tablero de Control</h1>
       
-      {/* 👇 AQUÍ ESTABA EL ERROR VISUAL: Ahora usamos startOfToday que es inequívocamente hoy */}
       <p className="text-gray-500 mb-8 capitalize">
-        Visión general del negocio hoy, {startOfToday.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' })}.
+        Resumen del {startOfToday.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' })}.
       </p>
 
-      {/* SECCIÓN 1: CAJA DEL DÍA */}
+      {/* SECCIÓN 1: CAJA DEL DÍA DETALLADA */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
-        <div className="bg-gradient-to-br from-green-600 to-green-700 text-white p-6 rounded-lg shadow-lg transform hover:scale-105 transition">
-            <p className="text-green-100 text-sm font-bold uppercase tracking-wider">Caja de Hoy</p>
-            <p className="text-4xl font-bold mt-2">${todayRevenue.toLocaleString()}</p>
-            <p className="text-sm opacity-80 mt-1">{todayTransactions} ventas registradas</p>
+        
+        {/* Caja de Hoy (Principal) */}
+        <div className="bg-slate-900 text-white p-6 rounded-lg shadow-lg relative overflow-hidden">
+            <div className="relative z-10">
+                <p className="text-slate-400 text-sm font-bold uppercase tracking-wider">Ventas de Hoy</p>
+                <p className="text-4xl font-bold mt-2">${todayStats.total.toLocaleString()}</p>
+                <div className="mt-4 flex gap-4 text-sm">
+                    <div>
+                        <span className="block text-green-400 font-bold">💵 ${todayStats.cash.toLocaleString()}</span>
+                        <span className="text-slate-500 text-xs">Efectivo</span>
+                    </div>
+                    <div className="border-l border-slate-700 pl-4">
+                        <span className="block text-blue-400 font-bold">💳 ${todayStats.digital.toLocaleString()}</span>
+                        <span className="text-slate-500 text-xs">Digital</span>
+                    </div>
+                </div>
+            </div>
         </div>
+
+        {/* Acumulado Mes */}
         <div className="bg-white p-6 rounded-lg shadow border-l-4 border-blue-600">
-            <p className="text-gray-500 text-sm font-bold uppercase">Acumulado Mes</p>
+            <p className="text-gray-500 text-sm font-bold uppercase">Facturación Mes</p>
             <p className="text-3xl font-bold text-gray-800 mt-2">${monthRevenue.toLocaleString()}</p>
             <p className="text-xs text-gray-400 mt-1">
-                Ganancia Neta: <span className="text-green-600 font-bold">${monthProfit.toLocaleString()}</span>
+                Ganancia Estimada: <span className="text-green-600 font-bold">${monthProfit.toLocaleString()}</span>
             </p>
         </div>
+
+        {/* Rentabilidad */}
         <div className="bg-white p-6 rounded-lg shadow border-l-4 border-purple-600">
-            <p className="text-gray-500 text-sm font-bold uppercase">Rentabilidad</p>
+            <p className="text-gray-500 text-sm font-bold uppercase">Margen Promedio</p>
             <p className="text-3xl font-bold text-gray-800 mt-2">{monthMargin.toFixed(1)}%</p>
-            <p className="text-xs text-gray-400 mt-1">Margen promedio sobre ventas</p>
+            <p className="text-xs text-gray-400 mt-1">Sobre ventas totales</p>
         </div>
       </div>
 
