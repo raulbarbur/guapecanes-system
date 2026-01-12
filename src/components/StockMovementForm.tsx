@@ -12,7 +12,14 @@ type ProductOption = {
   stock: number
 }
 
-export default function StockMovementForm({ products }: { products: ProductOption[] }) {
+// Props aceptadas: lista de productos y ruta de redirección opcional
+export default function StockMovementForm({ 
+  products, 
+  redirectPath 
+}: { 
+  products: ProductOption[], 
+  redirectPath?: string 
+}) {
   const [loading, setLoading] = useState(false)
   const router = useRouter()
 
@@ -27,9 +34,15 @@ export default function StockMovementForm({ products }: { products: ProductOptio
 
     if (result.success) {
       alert("✅ Movimiento registrado correctamente")
-      form.reset() // Limpiamos campos
-      router.refresh() // Refrescamos datos de fondo
-      router.push("/products") // Redirigimos al inventario
+      form.reset() 
+      router.refresh() // Refresca los datos en pantalla (Kardex o Lista)
+
+      // Lógica de redirección dinámica
+      if (redirectPath) {
+          router.push(redirectPath)
+      } else {
+          router.push("/products")
+      }
     } else {
       alert("❌ ERROR: " + result.error)
     }
@@ -67,16 +80,16 @@ export default function StockMovementForm({ products }: { products: ProductOptio
 
       {/* SELECCIÓN DE PRODUCTO */}
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">Producto</label>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Variante a Ajustar</label>
         <select 
             name="variantId" 
             required 
             className="w-full border p-3 rounded bg-white focus:ring-2 focus:ring-blue-500 outline-none"
         >
-          <option value="">Seleccionar producto...</option>
+          {products.length > 1 && <option value="">Seleccionar variante...</option>}
           {products.map(p => (
             <option key={p.variantId} value={p.variantId}>
-              {p.productName} (Stock: {p.stock}) - Dueño: {p.ownerName}
+              {p.productName} (Stock actual: {p.stock})
             </option>
           ))}
         </select>

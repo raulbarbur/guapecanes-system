@@ -3,27 +3,40 @@ import { prisma } from "@/lib/prisma"
 import PosSystem from "@/components/PosSystem"
 
 export default async function PosPage() {
-  // Buscamos productos activos
+  // 1. Buscamos productos activos con sus variantes
   const products = await prisma.product.findMany({
     where: { isActive: true },
     include: { 
         variants: true, 
         owner: true,
-        category: true // 👈 Agregamos esto
-    }
+        category: true 
+    },
+    orderBy: { name: 'asc' }
   })
 
-  // Transformamos los datos para el Frontend
-  const simpleProducts = products.map(p => {
-    const v = p.variants[0] // Asumimos variante única
+  // 2. ESTRUCTURAMOS JERÁRQUICAMENTE
+  // En lugar de aplanar, mandamos el objeto Producto con un array de sus variantes dentro.
+  const groupedProducts = products.map(p => {
+    // Calculamos el stock total para mostrar en la tarjeta principal
+    const totalStock = p.variants.reduce((sum, v) => sum + v.stock, 0)
+    
+    // Imagen principal (usamos la de la primera variante que tenga foto, o null)
+    const mainImage = p.variants.find(v => v.imageUrl)?.imageUrl || null
+
     return {
-      id: v.id,
+      id: p.id,
       name: p.name,
-      price: Number(v.salePrice),
-      stock: v.stock,
-      imageUrl: v.imageUrl,
+      categoryName: p.category.name,
       ownerName: p.owner.name,
-      categoryName: p.category.name // 👈 Dato clave para el filtro
+      imageUrl: mainImage,
+      totalStock: totalStock,
+      // Detalle de variantes para el modal
+      variants: p.variants.map(v => ({
+        id: v.id,
+        name: v.name, // "Rojo", "XL", "Estándar"
+        price: Number(v.salePrice),
+        stock: v.stock
+      }))
     }
   })
 
@@ -38,8 +51,8 @@ export default async function PosPage() {
         </div>
       </header>
       
-      {/* Cargamos el sistema interactivo */}
-      <PosSystem products={simpleProducts} />
+      {/* Pasamos la lista agrupada */}
+      <PosSystem products={groupedProducts} />
     </div>
   )
 }

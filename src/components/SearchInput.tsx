@@ -2,26 +2,39 @@
 'use client'
 
 import { useSearchParams, usePathname, useRouter } from 'next/navigation'
-import { useDebouncedCallback } from 'use-debounce' // Opcional, pero haremos una versión nativa para no obligarte a instalar librerías extra hoy.
+import { useState, useEffect } from 'react'
 
 export default function SearchInput({ placeholder }: { placeholder: string }) {
   const searchParams = useSearchParams()
   const pathname = usePathname()
   const { replace } = useRouter()
+  
+  // Inicializamos con el valor de la URL
+  const [term, setTerm] = useState(searchParams.get('query')?.toString() || '')
 
-  // Función para manejar el cambio en el input con un pequeño retraso (Debounce manual)
-  const handleSearch = (term: string) => {
-    const params = new URLSearchParams(searchParams)
-    
-    if (term) {
-      params.set('query', term)
-    } else {
-      params.delete('query')
-    }
-    
-    // replace actualiza la URL sin agregar una entrada al historial del navegador
-    replace(`${pathname}?${params.toString()}`)
-  }
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      const params = new URLSearchParams(searchParams)
+      
+      // Lógica de Protección anti-bucle:
+      // Obtenemos el valor que YA tiene la URL
+      const currentQueryInUrl = params.get('query') || ''
+      
+      // Si lo que escribí es IGUAL a lo que ya está en la URL, NO hago nada.
+      // Esto detiene el ciclo infinito de actualizaciones.
+      if (currentQueryInUrl === term) return
+
+      if (term) {
+        params.set('query', term)
+      } else {
+        params.delete('query')
+      }
+      
+      replace(`${pathname}?${params.toString()}`)
+    }, 300)
+
+    return () => clearTimeout(timeoutId)
+  }, [term, searchParams, pathname, replace])
 
   return (
     <div className="relative flex flex-1 flex-shrink-0">
@@ -31,14 +44,9 @@ export default function SearchInput({ placeholder }: { placeholder: string }) {
       <input
         className="peer block w-full rounded-md border border-gray-200 py-[9px] pl-10 text-sm outline-2 placeholder:text-gray-500 focus:border-blue-500 focus:ring-blue-500"
         placeholder={placeholder}
-        onChange={(e) => {
-            // Un pequeño debounce nativo usando timeout si escriben muy rápido
-            // Nota: En producción idealmente usamos una librería como 'use-debounce'
-            handleSearch(e.target.value) 
-        }}
-        defaultValue={searchParams.get('query')?.toString()}
+        value={term}
+        onChange={(e) => setTerm(e.target.value)}
       />
-      {/* Icono de Lupa (SVG) */}
       <svg
         xmlns="http://www.w3.org/2000/svg"
         fill="none"

@@ -3,6 +3,7 @@
 
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
+import { getVariantStockHistory, translateMovementType } from "@/services/inventory-service" // 👈 Importamos el servicio
 
 // Definimos los tipos permitidos según el Schema y la UI
 type MovementType = "ENTRY" | "OWNER_WITHDRAWAL" | "ADJUSTMENT"
@@ -96,5 +97,25 @@ function getDefaultReason(type: MovementType): string {
         case "OWNER_WITHDRAWAL": return "Retiro de dueño"
         case "ADJUSTMENT": return "Baja por rotura/pérdida"
         default: return "Movimiento de stock"
+    }
+}
+
+// 👇 NUEVA ACCIÓN DE LECTURA (Para consumir desde el nuevo Frontend)
+export async function getHistory(variantId: string) {
+    if (!variantId) return { error: "ID requerido" }
+    
+    try {
+        const rawHistory = await getVariantStockHistory(variantId)
+        
+        // Enriquecemos los datos para la UI (Traducción)
+        const history = rawHistory.map(h => ({
+            ...h,
+            typeLabel: translateMovementType(h.type)
+        }))
+        
+        return { success: true, data: history }
+    } catch (error) {
+        console.error("Error leyendo historial:", error)
+        return { error: "Error al obtener datos" }
     }
 }

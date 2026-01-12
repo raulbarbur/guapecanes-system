@@ -11,36 +11,50 @@ export async function createSettlement(formData: FormData) {
   if (!ownerId) return { error: "ID de dueño requerido" }
 
   try {
-    // 1. Recalcular deuda en el servidor (Fuente de la verdad)
-    // No confiamos en lo que diga el frontend, recalculamos aquí.
-    const pendingItems = await prisma.saleItem.findMany({
+    // 1. BUSCAR CANDIDATOS (Snapshot)
+    // No usamos el servicio genérico getOwnerBalance aquí porque necesitamos los IDs específicos
+    // para "congelar" la liquidación y evitar race conditions.
+
+    const pendingSaleItems = await prisma.saleItem.findMany({
       where: {
         isSettled: false,
         variant: { product: { ownerId: ownerId } }
-      }
+      },
+      select: { id: true, costAtSale: true, quantity: true }
     })
 
     const pendingAdjustments = await prisma.balanceAdjustment.findMany({
-      where: { ownerId: ownerId, isApplied: false }
+      where: {
+        ownerId: ownerId,
+        isApplied: false
+      },
+      select: { id: true, amount: true }
     })
 
-    // 2. Sumas
-    const debtFromSales = pendingItems.reduce((sum, item) => sum + (Number(item.costAtSale) * item.quantity), 0)
-    const debtFromAdj = pendingAdjustments.reduce((sum, adj) => sum + Number(adj.amount), 0)
-    
-    const totalToPay = debtFromSales + debtFromAdj
+    // 2. CALCULAR TOTAL A PAGAR (En memoria)
+    const debtFromSales = pendingSaleItems.reduce((sum, item) => {
+        return sum + (Number(item.costAtSale) * item.quantity)
+    }, 0)
 
-    // 3. VALIDACIÓN DE NEGOCIO (Blindaje)
-    // Solo permitimos liquidar si efectivamente le debemos plata al dueño.
+    const debtFromAdjustments = pendingAdjustments.reduce((sum, adj) => {
+        return sum + Number(adj.amount)
+    }, 0)
+
+    const totalToPay = debtFromSales + debtFromAdjustments
+
+    // 3. VALIDACIÓN FINANCIERA
+    // Solo permitimos liquidar si el saldo es positivo (A favor del dueño).
+    // Si es negativo (El dueño nos debe), esperamos a que venda más cosas para compensar.
     if (totalToPay <= 0) {
         return { 
             error: `No se puede liquidar. El saldo es $${totalToPay.toLocaleString()}. Solo se registran pagos cuando hay deuda a favor del dueño.` 
         }
     }
 
-    // 4. TRANSACCIÓN
+    // 4. TRANSACCIÓN DE ESCRITURA (Atomicidad Estricta)
     await prisma.$transaction(async (tx) => {
-      // A. Crear Recibo
+      
+      // A. Crear Recibo (Settlement)
       const newSettlement = await tx.settlement.create({
         data: {
           ownerId,
@@ -48,38 +62,38 @@ export async function createSettlement(formData: FormData) {
         }
       })
 
-      // B. Marcar items como pagados
-      if (pendingItems.length > 0) {
-        await tx.saleItem.updateMany({
-          where: { id: { in: pendingItems.map(i => i.id) } },
-          data: { isSettled: true, settlementId: newSettlement.id }
-        })
+      // B. Marcar items específicos como pagados
+      // Usamos los IDs capturados en el paso 1. Si entró una venta nueva hace 1ms, 
+      // no está en esta lista y quedará para la próxima. Seguro.
+      if (pendingSaleItems.length > 0) {
+          await tx.saleItem.updateMany({
+            where: {
+              id: { in: pendingSaleItems.map(i => i.id) }
+            },
+            data: { isSettled: true, settlementId: newSettlement.id }
+          })
       }
 
-      // C. Marcar ajustes como aplicados
+      // C. Marcar ajustes específicos como aplicados
       if (pendingAdjustments.length > 0) {
-        await tx.balanceAdjustment.updateMany({
-            where: { id: { in: pendingAdjustments.map(a => a.id) } },
-            data: { isApplied: true, settlementId: newSettlement.id }
-        })
+          await tx.balanceAdjustment.updateMany({
+              where: { 
+                  id: { in: pendingAdjustments.map(a => a.id) }
+              },
+              data: { isApplied: true, settlementId: newSettlement.id }
+          })
       }
     })
 
     revalidatePath("/owners/balance")
     revalidatePath(`/owners/settlement/${ownerId}`)
     revalidatePath(`/owners/${ownerId}`)
-
-    // Nota: No hacemos redirect aquí para poder retornar el objeto { success: true }
-    // El componente cliente (SettlementButton) debería manejar la navegación si lo desea,
-    // o simplemente mostrar un éxito. 
-    // Como SettlementButton es un botón simple dentro de un form action tradicional,
-    // haremos un redirect exitoso a la lista general.
     
   } catch (error) {
     console.error("Error en liquidación:", error)
     return { error: "Error interno al procesar el pago." }
   }
 
-  // Éxito: Volvemos al balance general
+  // Éxito: Redirigir al balance general
   redirect("/owners/balance")
 }

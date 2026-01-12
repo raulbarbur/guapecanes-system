@@ -3,7 +3,7 @@
 
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
-import { buildArgentinaDate } from "@/lib/utils" // 👈 Importamos
+import { buildArgentinaDate } from "@/lib/utils"
 
 type ApptStatus = 'PENDING' | 'CONFIRMED' | 'COMPLETED' | 'BILLED' | 'CANCELLED'
 
@@ -66,6 +66,7 @@ export async function createAppointment(formData: FormData) {
 
     revalidatePath("/agenda")
     revalidatePath("/dashboard")
+    revalidatePath(`/pets/${petId}`) // Refrescamos también la ficha de la mascota
     return { success: true }
 
   } catch (error) {
@@ -76,27 +77,76 @@ export async function createAppointment(formData: FormData) {
 
 export async function cancelAppointment(formData: FormData) {
     const id = formData.get("id") as string
+
+    if (!id) return { error: "ID no provisto" }
+
     try {
+        // 1. LEER ANTES DE ESCRIBIR (Validación de Estado)
+        const appointment = await prisma.appointment.findUnique({
+            where: { id },
+            select: { status: true }
+        })
+
+        if (!appointment) return { error: "Turno no encontrado" }
+
+        // 2. REGLA DE ORO: No cancelar lo cobrado ni lo completado
+        if (appointment.status === 'BILLED') {
+            console.warn(`Intento de cancelar turno cobrado: ${id}`)
+            return { error: "⛔ No se puede cancelar: El turno ya fue COBRADO. Debés anular la venta en la sección Ventas." }
+        }
+        
+        if (appointment.status === 'COMPLETED') {
+             return { error: "⚠️ El turno ya fue realizado (COMPLETADO). No se puede cancelar." }
+        }
+
+        // 3. EJECUTAR CANCELACIÓN
         await prisma.appointment.update({
             where: { id },
             data: { status: 'CANCELLED' }
         })
+
         revalidatePath("/agenda")
         revalidatePath("/dashboard")
+        return { success: true }
+
     } catch (error) {
-        console.error(error)
+        console.error("Error cancelando:", error)
+        return { error: "Error interno al cancelar" }
     }
 }
 
 export async function updateAppointmentStatus(id: string, newStatus: ApptStatus) {
     try {
+        // 1. LEER ESTADO ACTUAL
+        const currentAppt = await prisma.appointment.findUnique({
+            where: { id },
+            select: { status: true }
+        })
+
+        if (!currentAppt) return { error: "Turno inexistente" }
+
+        // 2. VALIDACIONES DE TRANSICIÓN
+
+        // A. Si ya está cobrado, es INMUTABLE desde la agenda
+        if (currentAppt.status === 'BILLED') {
+            return { error: "⛔ Turno cerrado/cobrado. No admite cambios de estado." }
+        }
+
+        // B. No permitir pasar a 'BILLED' manualmente (eso lo hace la Caja)
+        if (newStatus === 'BILLED') {
+            return { error: "⛔ Acción denegada. El estado 'COBRADO' solo lo asigna el sistema de Caja." }
+        }
+
+        // 3. ACTUALIZAR
         await prisma.appointment.update({
             where: { id },
             data: { status: newStatus }
         })
+
         revalidatePath("/agenda")
         revalidatePath("/dashboard")
         return { success: true }
+
     } catch (error) {
         console.error("Error cambiando estado:", error)
         return { error: "No se pudo actualizar el estado" }

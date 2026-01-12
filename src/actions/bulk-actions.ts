@@ -3,94 +3,140 @@
 
 import { prisma } from "@/lib/prisma"
 
-// Definimos qué esperamos recibir de cada fila del Excel
+// Definimos la nueva estructura esperada (incluye variantName)
 type ImportRow = {
   name: string
+  variantName?: string // 👈 Campo nuevo opcional
   categoryName: string
   ownerName: string
   cost: number
   price: number
 }
 
+// Helper simple para convertir a Title Case
+function toTitleCase(str: string) {
+  return str.replace(
+    /\w\S*/g,
+    (txt) => txt.charAt(0).toUpperCase() + txt.substring(1).toLowerCase()
+  )
+}
+
 export async function importSingleProduct(data: ImportRow) {
   try {
-    // 1. SANITIZACIÓN Y VALIDACIÓN PREVIA (Fail Fast)
+    // 1. SANITIZACIÓN Y VALIDACIÓN (Fail Fast)
     if (!data.name || !data.categoryName || !data.ownerName) {
       return { success: false, error: "Datos incompletos: Faltan Nombre, Categoría o Dueño." }
     }
 
-    // Aseguramos que sean números (por si viene texto o vacío del Excel)
     const cost = Number(data.cost)
     const price = Number(data.price)
 
     if (isNaN(cost) || isNaN(price)) {
-      return { success: false, error: "Formato inválido: Costo y Precio deben ser numéricos." }
+      return { success: false, error: "Formato inválido: Costo y Precio deben ser números." }
     }
 
-    // 2. REGLAS DE ORO (Validación de Negocio)
+    // 2. REGLAS FINANCIERAS (Guard Clauses)
     if (cost < 0 || price < 0) {
-      return { success: false, error: "Error financiero: No se permiten importes negativos." }
+      return { success: false, error: "Error financiero: Importes negativos no permitidos." }
     }
 
-    // Regla: Integridad de Rentabilidad (salvo que sea 0 y 0 para carga inicial pendiente)
     if (price < cost) {
-      return { success: false, error: `Rentabilidad negativa: Costo ($${cost}) mayor a Venta ($${price}).` }
+      return { success: false, error: `Rentabilidad negativa: Costo ($${cost}) > Venta ($${price}).` }
     }
 
-    // 3. BUSCAR O CREAR CATEGORÍA
-    // Buscamos exacto o insensible a mayúsculas para evitar duplicados como "Juguetes" y "juguetes"
-    let category = await prisma.category.findFirst({
-      where: { name: { equals: data.categoryName, mode: 'insensitive' } }
-    })
-
-    if (!category) {
-      // Si no existe, la creamos (Normalizamos el nombre tal cual viene)
-      category = await prisma.category.create({
-        data: { name: data.categoryName } 
-      })
-    }
-
-    // 4. VALIDAR DUEÑO EXISTENTE
-    // Asumimos que el dueño YA DEBE EXISTIR en la base de datos.
+    // 3. NORMALIZAR DATOS
+    const productName = data.name.trim()
+    // Si no ponen variante, asumimos "Estándar"
+    const variantName = data.variantName && data.variantName.trim() !== "" 
+        ? data.variantName.trim() 
+        : "Estándar"
+    
+    // 4. BUSCAR O CREAR ENTIDADES RELACIONADAS (Dueño y Categoría)
+    
+    // A. Dueño
     const owner = await prisma.owner.findFirst({
       where: { name: { equals: data.ownerName, mode: 'insensitive' } }
     })
 
     if (!owner) {
-      return { success: false, error: `Dueño desconocido: "${data.ownerName}". Crealo antes de importar.` }
+      return { success: false, error: `Dueño desconocido: "${data.ownerName}". Crealo en el sistema primero.` }
     }
 
-    // 5. TRANSACCIÓN DB (Creación del Producto)
-    await prisma.$transaction(async (tx) => {
-      
-      // A. Crear el Producto Padre
-      const newProduct = await tx.product.create({
-        data: {
-          name: data.name,
-          categoryId: category.id,
-          ownerId: owner.id,
-          isActive: true
-        }
-      })
-
-      // B. Crear la Variante (Hijo)
-      await tx.productVariant.create({
-        data: {
-          productId: newProduct.id,
-          name: "Estándar",
-          costPrice: cost,
-          salePrice: price,
-          stock: 0, // Regla: Siempre nace en 0. Se debe hacer Ingreso de Stock después.
-          imageUrl: null 
-        }
-      })
+    // B. Categoría (Upsert manual)
+    const normalizedCategory = toTitleCase(data.categoryName.trim())
+    let category = await prisma.category.findFirst({
+      where: { name: { equals: normalizedCategory, mode: 'insensitive' } }
     })
+
+    if (!category) {
+      category = await prisma.category.create({
+        data: { name: normalizedCategory } 
+      })
+    }
+
+    // 5. LÓGICA CORE: PADRE E HIJO
+    
+    // Buscamos si el Producto Padre ya existe para este dueño
+    const existingProduct = await prisma.product.findFirst({
+        where: {
+            name: { equals: productName, mode: 'insensitive' },
+            ownerId: owner.id
+        }
+    })
+
+    if (existingProduct) {
+        // CASO A: EL PRODUCTO EXISTE -> Intentamos agregar la VARIANTE
+        
+        // Verificamos si YA existe esa variante específica
+        const existingVariant = await prisma.productVariant.findFirst({
+            where: {
+                productId: existingProduct.id,
+                name: { equals: variantName, mode: 'insensitive' }
+            }
+        })
+
+        if (existingVariant) {
+            return { success: false, error: `Omitido: Ya existe la variante "${variantName}" en "${productName}".` }
+        }
+
+        // Crear la variante nueva en el producto existente
+        await prisma.productVariant.create({
+            data: {
+                productId: existingProduct.id,
+                name: variantName,
+                costPrice: cost,
+                salePrice: price,
+                stock: 0, // Siempre nace en 0
+                imageUrl: null
+            }
+        })
+
+    } else {
+        // CASO B: EL PRODUCTO NO EXISTE -> Creamos PADRE + HIJO
+        
+        await prisma.product.create({
+            data: {
+                name: productName,
+                categoryId: category.id,
+                ownerId: owner.id,
+                isActive: true,
+                variants: {
+                    create: {
+                        name: variantName,
+                        costPrice: cost,
+                        salePrice: price,
+                        stock: 0,
+                        imageUrl: null
+                    }
+                }
+            }
+        })
+    }
 
     return { success: true }
 
   } catch (error: any) {
-    console.error("Error crítico importando:", error)
-    // Devolvemos el mensaje limpio si es posible
+    console.error("Error importando:", error)
     return { success: false, error: error.message || "Error interno del servidor" }
   }
 }

@@ -5,41 +5,99 @@ import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
+// --- TIPOS INTERNOS ---
+type VariantInput = {
+    id?: string
+    name: string
+    costPrice: number
+    salePrice: number
+}
+
+// --- HELPERS DE VALIDACIÓN ---
+
+// 1. Resolver Categoría (Existente o Nueva)
+async function resolveCategoryId(formData: FormData): Promise<string | null> {
+    const isNewCategory = formData.get("isNewCategory") === "true"
+    if (isNewCategory) {
+        const newName = formData.get("categoryName") as string
+        if (!newName || newName.trim() === "") return null
+        
+        // Buscamos case-insensitive para no duplicar "Juguetes" y "juguetes"
+        const existing = await prisma.category.findFirst({
+            where: { name: { equals: newName, mode: 'insensitive' } }
+        })
+        if (existing) return existing.id
+        
+        const created = await prisma.category.create({ data: { name: newName.trim() } })
+        return created.id
+    }
+    return formData.get("categoryId") as string
+}
+
+// 2. Validar Reglas de Negocio Financieras
+function validateVariants(variants: VariantInput[]): string | null {
+    if (!Array.isArray(variants) || variants.length === 0) {
+        return "Debe haber al menos una variante."
+    }
+
+    for (const v of variants) {
+        const cost = Number(v.costPrice)
+        const price = Number(v.salePrice)
+
+        // A. Validación de Tipo
+        if (isNaN(cost) || isNaN(price)) {
+            return `Error en variante "${v.name}": Precios inválidos.`
+        }
+
+        // B. Validación de Signo (No negativos)
+        if (cost < 0 || price < 0) {
+            return `Error en variante "${v.name}": Los importes no pueden ser negativos.`
+        }
+
+        // C. Regla de Oro: Rentabilidad (Precio >= Costo)
+        if (price < cost) {
+            return `Rentabilidad negativa en "${v.name}". Costo ($${cost}) es mayor a Venta ($${price}).`
+        }
+
+        // D. Validación de Nombre
+        if (!v.name || v.name.trim() === "") {
+            return "Todas las variantes deben tener un nombre."
+        }
+    }
+
+    return null // null significa que pasó todas las validaciones
+}
+
+
+// --- ACTIONS PÚBLICAS ---
+
 export async function createProduct(formData: FormData) {
-  // 1. Obtener datos
   const name = formData.get("name") as string
   const description = formData.get("description") as string
   const ownerId = formData.get("ownerId") as string
-  const categoryId = formData.get("categoryId") as string
   const imageUrl = formData.get("imageUrl") as string 
-  
-  // Convertir números
-  const costPrice = parseFloat(formData.get("costPrice") as string)
-  const salePrice = parseFloat(formData.get("salePrice") as string)
+  const variantsJson = formData.get("variantsJson") as string
 
-  // 2. VALIDACIONES DE SISTEMA
-  if (!name || !ownerId || !categoryId) {
-    return { error: "Faltan datos obligatorios (Nombre, Dueño o Categoría)" }
+  // 1. Validaciones de Estructura
+  const categoryId = await resolveCategoryId(formData)
+  if (!name || !ownerId || !categoryId) return { error: "Faltan datos obligatorios." }
+
+  let variants: VariantInput[] = []
+  try {
+    variants = JSON.parse(variantsJson || "[]")
+  } catch (e) {
+    return { error: "Error procesando variantes (JSON inválido)." }
   }
 
-  if (isNaN(costPrice) || isNaN(salePrice)) {
-    return { error: "Los precios deben ser números válidos." }
-  }
-
-  // 3. VALIDACIONES DE NEGOCIO (Reglas de Oro)
-  if (costPrice < 0 || salePrice < 0) {
-    return { error: "Los precios no pueden ser negativos." }
-  }
-
-  // Regla: No vender a pérdida (salvo excepciones, pero por defecto protegemos)
-  if (salePrice < costPrice) {
-    return { error: `ERROR DE RENTABILIDAD: Estás vendiendo a $${salePrice} algo que costó $${costPrice}.` }
+  // 2. Validaciones de Negocio (Fail Fast)
+  const validationError = validateVariants(variants)
+  if (validationError) {
+      return { error: validationError }
   }
 
   try {
-    // 4. LA TRANSACCIÓN
     await prisma.$transaction(async (tx) => {
-      // A. Crear Producto
+      // 3. Crear Producto Cabecera
       const newProduct = await tx.product.create({
         data: {
           name,
@@ -50,27 +108,27 @@ export async function createProduct(formData: FormData) {
         }
       })
 
-      // B. Crear Variante Inicial (Stock 0 siempre)
-      await tx.productVariant.create({
-        data: {
-          productId: newProduct.id,
-          name: "Estándar",
-          imageUrl: imageUrl || null,
-          costPrice: costPrice,
-          salePrice: salePrice,
-          stock: 0 
-        }
-      })
+      // 4. Crear Variantes
+      for (const v of variants) {
+        await tx.productVariant.create({
+            data: {
+                productId: newProduct.id,
+                name: v.name,
+                imageUrl: imageUrl || null, // Comparten imagen por ahora
+                costPrice: v.costPrice,
+                salePrice: v.salePrice,
+                stock: 0 // Regla: Siempre nace en 0. Se carga por Inventario.
+            }
+        })
+      }
     })
 
     revalidatePath("/products")
-
   } catch (error) {
-    console.error("Error creando producto:", error)
-    return { error: "Error interno al guardar el producto." }
+    console.error("Error creando:", error)
+    return { error: "Error interno al guardar producto." }
   }
   
-  // 5. Redirección exitosa (fuera del try/catch)
   redirect("/products")
 }
 
@@ -78,40 +136,60 @@ export async function updateProduct(formData: FormData) {
   const id = formData.get("id") as string
   const name = formData.get("name") as string
   const description = formData.get("description") as string
-  const categoryId = formData.get("categoryId") as string
   const ownerId = formData.get("ownerId") as string
   const imageUrl = formData.get("imageUrl") as string
+  const variantsJson = formData.get("variantsJson") as string
   
-  const costPrice = parseFloat(formData.get("costPrice") as string)
-  const salePrice = parseFloat(formData.get("salePrice") as string)
+  const categoryId = await resolveCategoryId(formData)
+  if (!id || !name || !categoryId) return { error: "Datos faltantes" }
 
-  if (!id || !name) return { error: "Datos faltantes" }
+  let variants: VariantInput[] = []
+  try {
+    variants = JSON.parse(variantsJson || "[]")
+  } catch (e) {
+    return { error: "Error en variantes." }
+  }
 
-  // Validaciones de Negocio también al editar
-  if (isNaN(costPrice) || isNaN(salePrice)) return { error: "Precios inválidos" }
-  if (costPrice < 0 || salePrice < 0) return { error: "Precios negativos no permitidos" }
-  if (salePrice < costPrice) return { error: `Rentabilidad negativa: Costo $${costPrice} > Venta $${salePrice}` }
+  // 1. Validaciones de Negocio (Fail Fast)
+  const validationError = validateVariants(variants)
+  if (validationError) {
+      return { error: validationError }
+  }
 
   try {
     await prisma.$transaction(async (tx) => {
-      // 1. Actualizar producto base
+      // 2. Actualizar Cabecera
       await tx.product.update({
         where: { id },
         data: { name, description, categoryId, ownerId }
       })
 
-      // 2. Actualizar precios en la variante
-      const variant = await tx.productVariant.findFirst({ where: { productId: id } })
-      
-      if (variant) {
-        await tx.productVariant.update({
-          where: { id: variant.id },
-          data: {
-            costPrice,
-            salePrice,
-            ...(imageUrl ? { imageUrl } : {}) 
-          }
-        })
+      // 3. Upsert Manual de Variantes
+      for (const v of variants) {
+        if (v.id) {
+            // A. Si tiene ID, actualizamos
+            await tx.productVariant.update({
+                where: { id: v.id },
+                data: {
+                    name: v.name,
+                    costPrice: v.costPrice,
+                    salePrice: v.salePrice,
+                    imageUrl: imageUrl || undefined // Actualiza si hay nueva imagen
+                }
+            })
+        } else {
+            // B. Si NO tiene ID, creamos
+            await tx.productVariant.create({
+                data: {
+                    productId: id,
+                    name: v.name,
+                    costPrice: v.costPrice,
+                    salePrice: v.salePrice,
+                    stock: 0, // Las nuevas variantes nacen sin stock
+                    imageUrl: imageUrl || null
+                }
+            })
+        }
       }
     })
 
@@ -119,27 +197,32 @@ export async function updateProduct(formData: FormData) {
     revalidatePath("/pos") 
     return { success: true }
 
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error actualizando:", error)
-    return { error: "No se pudo actualizar el producto" }
+    
+    // Manejo de Error de Unicidad (Nombre de variante duplicado en mismo producto)
+    if (error.code === 'P2002') {
+        return { error: "No pueden haber dos variantes con el mismo nombre." }
+    }
+    return { error: "No se pudo actualizar el producto." }
   }
 }
 
 export async function toggleProductStatus(productId: string, currentStatus: boolean) {
   try {
-    // REGLA DE ORO: No archivar si hay stock positivo
+    // Regla: No archivar si hay stock físico real
     if (currentStatus === true) { 
-      const variant = await prisma.productVariant.findFirst({ where: { productId } })
-      if (variant && variant.stock > 0) {
-        return { error: "No se puede archivar un producto con stock. Hacé un retiro o ajuste a 0 primero." }
+      const variantWithStock = await prisma.productVariant.findFirst({ 
+        where: { productId, stock: { gt: 0 } }
+      })
+      if (variantWithStock) {
+        return { error: "No se puede archivar: Hay variantes con stock." }
       }
     }
-
     await prisma.product.update({
       where: { id: productId },
       data: { isActive: !currentStatus }
     })
-
     revalidatePath("/products")
     revalidatePath("/pos")
     return { success: true }

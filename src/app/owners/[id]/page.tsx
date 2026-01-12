@@ -24,29 +24,26 @@ export default async function OwnerProfilePage({ params }: Props) {
         orderBy: { createdAt: 'desc' },
         take: 20 // Últimos 20 pagos
       },
-      // C. Deuda Pendiente (Cálculo en vivo)
+      // C. Deuda Pendiente
       balanceAdjustments: { where: { isApplied: false } }
     }
   })
 
   if (!owner) return notFound()
 
-  // 2. CÁLCULOS EN MEMORIA
-  
-  // A. Inventario en consignación (Stock > 0)
+  // 2. CÁLCULOS
   const activeInventory = owner.products.flatMap(p => 
     p.variants.filter(v => v.stock > 0).map(v => ({
-      name: p.name, // Variante podría tener nombre propio si quisieras
-      price: v.salePrice,
-      cost: v.costPrice,
+      name: v.name === 'Estándar' ? p.name : `${p.name} - ${v.name}`,
+      // ⚠️ CORRECCIÓN AQUÍ: Convertimos Decimal a Number
+      price: Number(v.salePrice),
+      cost: Number(v.costPrice),
       stock: v.stock,
       image: v.imageUrl
     }))
   )
 
-  // B. Calcular Deuda Pendiente (Similar a la página de Balance)
-  // Necesitamos buscar los items vendidos NO pagados. 
-  // Nota: Hacemos esta query aparte para no traer TODAS las ventas históricas en el include principal.
+  // Calcular Deuda Pendiente
   const pendingItems = await prisma.saleItem.findMany({
     where: {
       isSettled: false,
@@ -61,7 +58,7 @@ export default async function OwnerProfilePage({ params }: Props) {
   return (
     <div className="p-8 max-w-6xl mx-auto">
       
-      {/* HEADER / TARJETA DE PERFIL */}
+      {/* HEADER */}
       <div className="flex flex-col md:flex-row justify-between items-start gap-6 mb-8">
         <div>
             <Link href="/owners" className="text-sm text-blue-600 hover:underline mb-2 block">← Volver al listado</Link>
@@ -152,21 +149,25 @@ export default async function OwnerProfilePage({ params }: Props) {
                     <div className="p-8 text-center text-gray-400">Nunca se le ha pagado.</div>
                 ) : (
                     owner.settlements.map(settlement => (
-                        <div key={settlement.id} className="p-4 flex justify-between items-center hover:bg-gray-50">
+                        <div key={settlement.id} className="p-4 flex justify-between items-center hover:bg-gray-50 group">
                             <div>
                                 <p className="font-bold text-gray-800">
                                     {settlement.createdAt.toLocaleDateString()}
                                 </p>
                                 <p className="text-xs text-gray-400 font-mono">
-                                    ID: {settlement.id.slice(0, 8)}...
+                                    REF: {settlement.id.slice(0, 8)}
                                 </p>
                             </div>
-                            <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-3">
                                 <span className="text-lg font-bold text-green-700">
                                     ${Number(settlement.totalAmount).toLocaleString()}
                                 </span>
-                                {/* Futuro: Link al detalle del recibo */}
-                                {/* <Link href={`/settlements/${settlement.id}`} className="...">📄</Link> */}
+                                <Link 
+                                    href={`/settlements/${settlement.id}`}
+                                    className="px-3 py-1 bg-blue-50 text-blue-600 rounded text-xs font-bold border border-blue-100 hover:bg-blue-100 transition"
+                                >
+                                    📄 Ver Recibo
+                                </Link>
                             </div>
                         </div>
                     ))

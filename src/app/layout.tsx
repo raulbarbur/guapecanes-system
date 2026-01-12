@@ -1,18 +1,11 @@
 // src/app/layout.tsx
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Inter } from "next/font/google"; // 👈 Cambiamos Geist por Inter
 import "./globals.css";
 import MainNav from "@/components/MainNav";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+// Configuramos la fuente Inter
+const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Guapecanes - Sistema de Gestión",
@@ -26,19 +19,16 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="es">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased bg-gray-50 min-h-screen`}>
+      {/* Aplicamos la clase de la fuente Inter */}
+      <body className={`${inter.className} antialiased bg-gray-50 min-h-screen`}>
         
         {/* CONTENEDOR PRINCIPAL */}
-        {/* Mobile: Columna (Contenido arriba, barra abajo) */}
-        {/* Desktop (md): Fila (Barra izquierda, contenido derecha) */}
         <div className="flex flex-col md:flex-row min-h-screen">
           
-          {/* 1. La Barra de Navegación (Se adapta sola por dentro) */}
+          {/* 1. Barra de Navegación */}
           <MainNav />
 
-          {/* 2. El Área de Contenido */}
-          {/* flex-1: Ocupa todo el espacio restante */}
-          {/* pb-20: Padding abajo para que en móvil la barra no tape el final de la página */}
+          {/* 2. Área de Contenido */}
           <main className="flex-1 pb-24 md:pb-0 md:px-0">
             {children}
           </main>
