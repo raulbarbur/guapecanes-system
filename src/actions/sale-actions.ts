@@ -25,55 +25,54 @@ export async function processSale(
     let createdSaleId = ""
     let createdDate = new Date()
 
-    // Usamos Transaction para atomicidad completa
+    // --- 1. PREPARACIÓN FUERA DE LA TRANSACCIÓN ---
+    // Buscamos todos los datos necesarios ANTES de bloquear la base de datos.
+    // Esto ahorra tiempo de red dentro del túnel de la transacción.
+    const productIds = cart.filter(i => i.type === 'PRODUCT').map(i => i.id)
+    
+    const dbVariants = await prisma.productVariant.findMany({
+      where: { id: { in: productIds } },
+      include: { product: true }
+    })
+
+    // --- 2. TRANSACCIÓN CON TIMEOUT EXTENDIDO ---
     await prisma.$transaction(async (tx) => {
       let totalReal = 0
       const saleItemsData = []
       const appointmentIdsToBill: string[] = []
 
       for (const item of cart) {
-        // A. PRODUCTO
         if (item.type === 'PRODUCT') {
-            // 1. Buscamos datos maestros (Precios, Dueño) para el SNAPSHOT
-            const variant = await tx.productVariant.findUnique({
-                where: { id: item.id },
-                include: { product: true }
-            })
-
+            const variant = dbVariants.find(v => v.id === item.id)
             if (!variant) throw new Error(`Producto no encontrado: ${item.description}`)
             
-            // 2. ACTUALIZACIÓN ATÓMICA DE STOCK (Concurrency Safe)
-            // Intentamos restar SOLO SI el stock actual es mayor o igual a la cantidad
+            // ACTUALIZACIÓN ATÓMICA DE STOCK
+            // Seguimos usando updateMany para el check de stock gte cantidad (Concurrency Safe)
             const updateResult = await tx.productVariant.updateMany({
                 where: { 
                     id: item.id,
-                    stock: { gte: item.quantity } // 🛡️ Condición de guarda atómica
+                    stock: { gte: item.quantity } 
                 },
                 data: { 
                     stock: { decrement: item.quantity } 
                 }
             })
 
-            // Si updateResult.count es 0, significa que falló la condición (no había stock suficiente)
-            // Esto protege contra race conditions (dos cajas vendiendo lo mismo al mismo tiempo)
             if (updateResult.count === 0) {
-                throw new Error(`Stock insuficiente al momento de confirmar: ${variant.product.name}`)
+                throw new Error(`Stock insuficiente para: ${variant.product.name}`)
             }
 
-            // Cálculos
             const subtotal = Number(variant.salePrice) * item.quantity
             totalReal += subtotal
 
-            // Preparamos el item de venta
             saleItemsData.push({
                 variantId: variant.id,
                 description: variant.product.name,
                 quantity: item.quantity,
-                costAtSale: variant.costPrice, // 📸 Snapshot de Costo
-                priceAtSale: variant.salePrice // 📸 Snapshot de Precio Venta
+                costAtSale: variant.costPrice,
+                priceAtSale: variant.salePrice
             })
 
-            // Registro de Movimiento
             await tx.stockMovement.create({
                 data: {
                     variantId: variant.id,
@@ -84,7 +83,6 @@ export async function processSale(
                 }
             })
         } 
-        // B. SERVICIO
         else if (item.type === 'SERVICE') {
             const subtotal = item.price * item.quantity
             totalReal += subtotal
@@ -101,7 +99,6 @@ export async function processSale(
         }
       }
 
-      // 3. Crear Venta Cabecera
       const sale = await tx.sale.create({
         data: {
           total: totalReal,
@@ -116,16 +113,18 @@ export async function processSale(
       createdSaleId = sale.id
       createdDate = sale.createdAt
 
-      // 4. Actualizar Turnos (Si hubo servicios)
       if (appointmentIdsToBill.length > 0) {
         await tx.appointment.updateMany({
             where: { id: { in: appointmentIdsToBill } },
             data: { status: 'BILLED' }
         })
       }
+    }, {
+      // CONFIGURACIÓN DE TIMEOUT (Solución al error de expiración)
+      maxWait: 10000, // Tiempo máximo para esperar a obtener una conexión (10s)
+      timeout: 20000  // Tiempo máximo de ejecución de la transacción (20s)
     })
 
-    // Revalidación de UI
     revalidatePath("/products")
     revalidatePath("/pos")
     revalidatePath("/agenda")
@@ -142,7 +141,6 @@ export async function processSale(
 export async function cancelSale(saleId: string) {
   try {
     await prisma.$transaction(async (tx) => {
-      // 1. Buscar venta con sus items y variantes
       const sale = await tx.sale.findUnique({
         where: { id: saleId },
         include: { items: { include: { variant: { include: { product: true } } } } } 
@@ -151,24 +149,18 @@ export async function cancelSale(saleId: string) {
       if (!sale) throw new Error("Venta no encontrada")
       if (sale.status === 'CANCELLED') throw new Error("Esta venta ya está anulada")
 
-      // 2. Marcar como Cancelada
       await tx.sale.update({
         where: { id: saleId },
         data: { status: 'CANCELLED' }
       })
 
-      // 3. Procesar devolución de Items
       for (const item of sale.items) {
-        // Solo restauramos stock si es un producto (tiene variantId)
         if (item.variantId && item.variant) {
-          
-          // A. Restaurar Stock
           await tx.productVariant.update({
             where: { id: item.variantId },
             data: { stock: { increment: item.quantity } }
           })
 
-          // B. Registrar Movimiento (Auditoría)
           await tx.stockMovement.create({
             data: {
               variantId: item.variantId,
@@ -179,15 +171,12 @@ export async function cancelSale(saleId: string) {
             }
           })
 
-          // C. AJUSTE FINANCIERO (CRÍTICO)
-          // Si el item ya fue liquidado (pagado al dueño), generamos una deuda.
           if (item.isSettled) {
             const amountOwedBack = Number(item.costAtSale) * item.quantity
-            
             await tx.balanceAdjustment.create({
               data: {
                 ownerId: item.variant.product.ownerId,
-                amount: -amountOwedBack, // Negativo = El dueño le debe al local
+                amount: -amountOwedBack,
                 description: `Devolución Liq. - Prod: ${item.description}`,
                 isApplied: false
               }
@@ -195,9 +184,9 @@ export async function cancelSale(saleId: string) {
           }
         }
       }
-      // Nota: Los servicios no afectan stock ni generan deuda a dueños (son ingreso propio),
-      // por lo que no requieren reversión compleja más allá de la anulación de la venta.
-      // (Queda pendiente: Revertir estado del turno de BILLED a COMPLETED si se deseara re-facturar).
+    }, {
+      maxWait: 10000,
+      timeout: 20000
     })
 
     revalidatePath("/sales")
