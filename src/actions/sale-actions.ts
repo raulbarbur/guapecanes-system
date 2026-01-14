@@ -3,6 +3,8 @@
 
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
+import { StockMovementType } from "@prisma/client"
+import { getSession } from "@/lib/auth" // 👈 Importamos autenticación
 
 type CartItem = {
   type: 'PRODUCT' | 'SERVICE'
@@ -19,15 +21,16 @@ export async function processSale(
     totalEstimado: number, 
     paymentMethod: PaymentMethod 
 ) {
+  // 1. SEGURIDAD: Verificar sesión antes de procesar dinero
+  const session = await getSession()
+  if (!session) return { error: "Sesión expirada. Iniciá sesión nuevamente." }
+
   if (cart.length === 0) return { error: "El carrito está vacío" }
 
   try {
     let createdSaleId = ""
     let createdDate = new Date()
 
-    // --- 1. PREPARACIÓN FUERA DE LA TRANSACCIÓN ---
-    // Buscamos todos los datos necesarios ANTES de bloquear la base de datos.
-    // Esto ahorra tiempo de red dentro del túnel de la transacción.
     const productIds = cart.filter(i => i.type === 'PRODUCT').map(i => i.id)
     
     const dbVariants = await prisma.productVariant.findMany({
@@ -35,10 +38,10 @@ export async function processSale(
       include: { product: true }
     })
 
-    // --- 2. TRANSACCIÓN CON TIMEOUT EXTENDIDO ---
     await prisma.$transaction(async (tx) => {
       let totalReal = 0
       const saleItemsData = []
+      const stockMovementsData = [] 
       const appointmentIdsToBill: string[] = []
 
       for (const item of cart) {
@@ -46,8 +49,6 @@ export async function processSale(
             const variant = dbVariants.find(v => v.id === item.id)
             if (!variant) throw new Error(`Producto no encontrado: ${item.description}`)
             
-            // ACTUALIZACIÓN ATÓMICA DE STOCK
-            // Seguimos usando updateMany para el check de stock gte cantidad (Concurrency Safe)
             const updateResult = await tx.productVariant.updateMany({
                 where: { 
                     id: item.id,
@@ -73,14 +74,12 @@ export async function processSale(
                 priceAtSale: variant.salePrice
             })
 
-            await tx.stockMovement.create({
-                data: {
-                    variantId: variant.id,
-                    quantity: -item.quantity,
-                    type: "SALE",
-                    reason: "Venta Mostrador",
-                    userId: "sistema"
-                }
+            stockMovementsData.push({
+                variantId: variant.id,
+                quantity: -item.quantity,
+                type: StockMovementType.SALE,
+                reason: "Venta Mostrador",
+                userId: session.userId // 👈 AUDITORÍA REAL
             })
         } 
         else if (item.type === 'SERVICE') {
@@ -99,14 +98,16 @@ export async function processSale(
         }
       }
 
+      if (stockMovementsData.length > 0) {
+          await tx.stockMovement.createMany({ data: stockMovementsData })
+      }
+
       const sale = await tx.sale.create({
         data: {
           total: totalReal,
           paymentMethod: paymentMethod, 
           status: "COMPLETED",
-          items: {
-            create: saleItemsData
-          }
+          items: { create: saleItemsData }
         }
       })
       
@@ -119,16 +120,13 @@ export async function processSale(
             data: { status: 'BILLED' }
         })
       }
-    }, {
-      // CONFIGURACIÓN DE TIMEOUT (Solución al error de expiración)
-      maxWait: 10000, // Tiempo máximo para esperar a obtener una conexión (10s)
-      timeout: 20000  // Tiempo máximo de ejecución de la transacción (20s)
-    })
+
+    }, { maxWait: 5000, timeout: 10000 })
 
     revalidatePath("/products")
     revalidatePath("/pos")
-    revalidatePath("/agenda")
     revalidatePath("/dashboard")
+    revalidatePath("/sales")
     
     return { success: true, saleId: createdSaleId, date: createdDate }
 
@@ -139,6 +137,10 @@ export async function processSale(
 }
 
 export async function cancelSale(saleId: string) {
+  // SEGURIDAD
+  const session = await getSession()
+  if (!session) return { error: "No autorizado" }
+
   try {
     await prisma.$transaction(async (tx) => {
       const sale = await tx.sale.findUnique({
@@ -147,56 +149,60 @@ export async function cancelSale(saleId: string) {
       })
 
       if (!sale) throw new Error("Venta no encontrada")
-      if (sale.status === 'CANCELLED') throw new Error("Esta venta ya está anulada")
+      if (sale.status === 'CANCELLED') throw new Error("Ya está anulada")
 
       await tx.sale.update({
         where: { id: saleId },
         data: { status: 'CANCELLED' }
       })
 
+      const movementsToCreate = []
+      const adjustmentsToCreate = []
+
       for (const item of sale.items) {
         if (item.variantId && item.variant) {
+          
           await tx.productVariant.update({
             where: { id: item.variantId },
             data: { stock: { increment: item.quantity } }
           })
 
-          await tx.stockMovement.create({
-            data: {
-              variantId: item.variantId,
-              quantity: item.quantity,
-              type: 'SALE_CANCELLED',
-              reason: `Anulación Venta #${sale.id.slice(0, 8)}`,
-              userId: 'sistema'
-            }
+          movementsToCreate.push({
+            variantId: item.variantId,
+            quantity: item.quantity,
+            type: StockMovementType.SALE_CANCELLED,
+            reason: `Anulación Venta #${sale.id.slice(0, 8)}`,
+            userId: session.userId // 👈 ID DEL USUARIO QUE CANCELA
           })
 
           if (item.isSettled) {
             const amountOwedBack = Number(item.costAtSale) * item.quantity
-            await tx.balanceAdjustment.create({
-              data: {
+            adjustmentsToCreate.push({
                 ownerId: item.variant.product.ownerId,
                 amount: -amountOwedBack,
                 description: `Devolución Liq. - Prod: ${item.description}`,
                 isApplied: false
-              }
             })
           }
         }
       }
-    }, {
-      maxWait: 10000,
-      timeout: 20000
+
+      if (movementsToCreate.length > 0) {
+          await tx.stockMovement.createMany({ data: movementsToCreate })
+      }
+      
+      if (adjustmentsToCreate.length > 0) {
+          await tx.balanceAdjustment.createMany({ data: adjustmentsToCreate })
+      }
+
     })
 
     revalidatePath("/sales")
     revalidatePath("/products") 
     revalidatePath("/owners/balance")
-    revalidatePath("/dashboard")
     return { success: true }
 
   } catch (error: any) {
-    console.error("Error anulando venta:", error)
-    return { error: error.message || "Error al anular venta" }
+    return { error: error.message }
   }
 }

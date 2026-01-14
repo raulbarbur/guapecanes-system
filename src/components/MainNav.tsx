@@ -3,6 +3,7 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
+import { logout } from "@/actions/auth-actions" // 👈 Importamos la acción
 
 export default function MainNav() {
   const pathname = usePathname()
@@ -17,13 +18,13 @@ export default function MainNav() {
     { href: "/pets", label: "Clientes", icon: "🐶", exact: false },
     { href: "/owners", label: "Consign.", icon: "👥", exact: false },
     { href: "/owners/balance", label: "Finanzas", icon: "⚖️", exact: true },
+    { href: "/admin/users", label: "Equipo", icon: "🛡️", exact: false },
   ]
 
   return (
     <>
       {/* ==============================================
           ESTILO ESCRITORIO (Sidebar Izquierda)
-          Visible solo en pantallas medianas o grandes (md:flex)
          ============================================== */}
       <aside className="hidden md:flex w-64 flex-col bg-slate-900 text-gray-300 border-r border-slate-800 h-screen sticky top-0 overflow-y-auto">
         
@@ -64,26 +65,34 @@ export default function MainNav() {
           })}
         </nav>
 
-        {/* FOOTER DEL SIDEBAR */}
-        <div className="p-4 border-t border-slate-800 text-center">
-            <div className="text-xs text-slate-500">
-                Usuario: Staff<br/>
-                <span className="text-green-500">● Online</span>
+        {/* FOOTER DEL SIDEBAR CON LOGOUT */}
+        <div className="p-4 border-t border-slate-800">
+            <div className="mb-4 text-center">
+                <p className="text-xs text-slate-500 uppercase font-bold">Estado</p>
+                <div className="flex items-center justify-center gap-2 text-xs text-green-400 mt-1">
+                    <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                    Online
+                </div>
             </div>
+
+            {/* 👇 BOTÓN DE CERRAR SESIÓN */}
+            <form action={logout}>
+                <button 
+                    type="submit"
+                    className="w-full flex items-center justify-center gap-2 bg-slate-800 hover:bg-red-900/30 text-slate-400 hover:text-red-400 py-2 rounded transition text-xs font-bold border border-slate-700 hover:border-red-900"
+                >
+                    <span>🚪</span> Cerrar Sesión
+                </button>
+            </form>
         </div>
       </aside>
 
 
       {/* ==============================================
           ESTILO MÓVIL (Bottom Navigation)
-          Visible solo en pantallas pequeñas (md:hidden)
-          Fijo abajo.
          ============================================== */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-slate-900 border-t border-slate-800 flex justify-between items-center px-2 py-2 safe-area-bottom shadow-2xl">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-slate-900 border-t border-slate-800 flex justify-between items-center px-2 py-2 safe-area-bottom shadow-2xl overflow-x-auto no-scrollbar">
         {routes.map((route) => {
-            // En móvil mostramos menos items o íconos más grandes. 
-            // Filtramos algunos si son muchos, o usamos scroll horizontal.
-            // Aquí usamos scroll horizontal simple si desborda.
             const isActive = route.exact 
                 ? pathname === route.href
                 : pathname.startsWith(route.href)
@@ -95,7 +104,7 @@ export default function MainNav() {
                 className={`
                   flex flex-col items-center justify-center min-w-[60px] p-1 rounded-md transition-colors
                   ${route.highlight 
-                      ? 'bg-green-600 text-white -mt-6 h-14 w-14 rounded-full shadow-lg border-4 border-gray-50' // Efecto botón flotante para CAJA
+                      ? 'bg-green-600 text-white -mt-6 h-14 w-14 rounded-full shadow-lg border-4 border-gray-50' 
                       : isActive 
                           ? 'text-white' 
                           : 'text-slate-500 hover:text-slate-300'
@@ -109,6 +118,15 @@ export default function MainNav() {
               </Link>
             )
         })}
+        
+        {/* Botón Salir Móvil (Pequeño al final) */}
+        <form action={logout} className="min-w-[50px] flex flex-col items-center justify-center border-l border-slate-800 pl-2 ml-1">
+            <button type="submit" className="text-red-500 text-xl hover:text-red-400">
+                🚪
+            </button>
+            <span className="text-[8px] font-bold text-red-500 uppercase mt-1">Salir</span>
+        </form>
+
       </nav>
     </>
   )
