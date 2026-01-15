@@ -2,24 +2,89 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 214, 219, 220;
-  --background-end-rgb: 255, 255, 255;
-}
+@layer base {
+  :root {
+    /* MODO CLARO (LIGHT) */
+    --background: 0 0% 100%;       /* Blanco puro */
+    --foreground: 240 10% 3.9%;    /* Gris muy oscuro (casi negro) */
 
-body {
-  color: rgb(var(--foreground-rgb));
-  background: linear-gradient(
-      to bottom,
-      transparent,
-      rgb(var(--background-end-rgb))
-    )
-    rgb(var(--background-start-rgb));
-}
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
 
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+
+    --primary: 262 83% 58%;        /* Indigo/Violeta vibrante */
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 240 4.8% 95.9%;   /* Gris muy claro para fondos secundarios */
+    --secondary-foreground: 240 5.9% 10%;
+
+    --muted: 240 4.8% 95.9%;       /* Gris suave (deshabilitado/fondo) */
+    --muted-foreground: 240 3.8% 46.1%; /* Texto secundario */
+
+    --accent: 240 4.8% 95.9%;      /* Hover states */
+    --accent-foreground: 240 5.9% 10%;
+
+    --destructive: 0 84.2% 60.2%;  /* Rojo error */
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 240 5.9% 90%;        /* Bordes sutiles */
+    --input: 240 5.9% 90%;
+    --ring: 262 83% 58%;
+
+    --radius: 0.75rem;             /* 12px redondeado */
   }
+
+  .dark {
+    /* MODO OSCURO (DARK) */
+    --background: 240 10% 3.9%;    /* Zinc 950 (No negro absoluto, mejor para la vista) */
+    --foreground: 0 0% 98%;        /* Blanco suave */
+
+    --card: 240 10% 6%;            /* Un poco más claro que el fondo (Zinc 900) */
+    --card-foreground: 0 0% 98%;
+
+    --popover: 240 10% 3.9%;
+    --popover-foreground: 0 0% 98%;
+
+    --primary: 263 70% 50%;        /* Indigo un poco más luminoso/saturado para contrastar */
+    --primary-foreground: 0 0% 98%;
+
+    --secondary: 240 3.7% 15.9%;   /* Gris oscuro para elementos secundarios */
+    --secondary-foreground: 0 0% 98%;
+
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 263 70% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Scrollbar personalizado para que no desentone */
+.custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+    @apply bg-transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    @apply bg-muted-foreground/20 rounded-full hover:bg-muted-foreground/40;
 }

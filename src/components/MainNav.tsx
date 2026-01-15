@@ -3,41 +3,40 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
+import { cn } from "@/lib/utils"
+import { ThemeToggle } from "./ThemeToggle"
 
 export default function MainNav() {
   const pathname = usePathname()
 
-  // Definimos las rutas
   const routes = [
-    { href: "/dashboard", label: "Dashboard", icon: "📊", exact: true },
-    { href: "/pos", label: "CAJA", icon: "💰", exact: true, highlight: true },
+    { href: "/dashboard", label: "Inicio", icon: "🏠", exact: true },
+    { href: "/pos", label: "Caja", icon: "🛍️", exact: true, highlight: true },
     { href: "/agenda", label: "Agenda", icon: "📅", exact: false },
-    { href: "/sales", label: "Ventas", icon: "🗂️", exact: false },
-    { href: "/products", label: "Productos", icon: "📦", exact: false },
-    { href: "/pets", label: "Clientes", icon: "🐶", exact: false },
-    { href: "/owners", label: "Consign.", icon: "👥", exact: false },
-    { href: "/owners/balance", label: "Finanzas", icon: "⚖️", exact: true },
+    { href: "/sales", label: "Ventas", icon: "🧾", exact: false },
+    { href: "/products", label: "Stock", icon: "🦴", exact: false },
+    { href: "/pets", label: "Mascotas", icon: "🐶", exact: false },
+    { href: "/owners", label: "Dueños", icon: "👥", exact: false },
+    { href: "/owners/balance", label: "Finanzas", icon: "💎", exact: true },
   ]
 
   return (
     <>
-      {/* ==============================================
-          ESTILO ESCRITORIO (Sidebar Izquierda)
-          Visible solo en pantallas medianas o grandes (md:flex)
-         ============================================== */}
-      <aside className="hidden md:flex w-64 flex-col bg-slate-900 text-gray-300 border-r border-slate-800 h-screen sticky top-0 overflow-y-auto">
+      {/* === DESKTOP SIDEBAR === */}
+      <aside className="hidden md:flex w-72 flex-col bg-card border-r border-border h-screen sticky top-0 z-50 transition-colors duration-300">
         
         {/* LOGO */}
-        <div className="p-6 border-b border-slate-800">
-          <h1 className="text-2xl font-bold text-white tracking-tight">
+        <div className="p-8 pb-6">
+          <h1 className="text-3xl font-black font-nunito tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-primary to-foreground animate-in fade-in">
             GUAPECANES
-            <span className="text-green-500">.</span>
           </h1>
-          <p className="text-xs text-slate-500 mt-1">Sistema de Gestión v3.0</p>
+          <p className="text-[10px] font-bold text-muted-foreground mt-0.5 uppercase tracking-widest">
+            Sistema Profesional v3
+          </p>
         </div>
 
-        {/* LISTA DE NAVEGACIÓN VERTICAL */}
-        <nav className="flex-1 py-6 px-3 space-y-2">
+        {/* NAV */}
+        <nav className="flex-1 px-4 space-y-2 py-4 overflow-y-auto custom-scrollbar">
           {routes.map((route) => {
             const isActive = route.exact 
                 ? pathname === route.href
@@ -47,68 +46,86 @@ export default function MainNav() {
               <Link
                 key={route.href}
                 href={route.href}
-                className={`
-                  flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200
-                  ${route.highlight 
-                      ? 'bg-gradient-to-r from-green-600 to-green-700 text-white shadow-lg shadow-green-900/20 hover:scale-105 justify-center text-base' 
-                      : isActive 
-                          ? 'bg-slate-800 text-white border-l-4 border-blue-500' 
-                          : 'hover:bg-slate-800 hover:text-white hover:pl-5'
-                  }
-                `}
+                className={cn(
+                  "flex items-center gap-4 px-4 py-3 rounded-2xl text-sm font-bold transition-all duration-200 group relative",
+                  
+                  // 1. ESTILO BOTÓN DESTACADO (CAJA) - Degradado Primario
+                  route.highlight 
+                    ? "bg-gradient-to-r from-primary to-accent text-primary-foreground shadow-lg shadow-primary/30 hover:shadow-primary/50 hover:scale-[1.02] justify-center text-base mb-6"
+                    
+                  // 2. ESTILO ACTIVO - Tinte suave del color primario
+                  : isActive 
+                        ? "bg-primary/10 text-primary" 
+                        
+                  // 3. ESTILO INACTIVO - Color muted
+                        : "text-muted-foreground hover:bg-secondary/20 hover:text-foreground"
+                )}
               >
-                <span className="text-xl">{route.icon}</span>
+                <span className={cn("text-xl transition-transform group-hover:scale-110", route.highlight && "animate-pulse")}>
+                    {route.icon}
+                </span>
                 {route.label}
+                
+                {/* Indicador de Activo (Puntito) */}
+                {!route.highlight && isActive && (
+                    <div className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />
+                )}
               </Link>
             )
           })}
         </nav>
 
-        {/* FOOTER DEL SIDEBAR */}
-        <div className="p-4 border-t border-slate-800 text-center">
-            <div className="text-xs text-slate-500">
-                Usuario: Staff<br/>
-                <span className="text-green-500">● Online</span>
+        {/* FOOTER & TOGGLE */}
+        <div className="p-4 border-t border-border">
+            <div className="flex justify-between items-center bg-background/50 p-3 rounded-2xl border border-border">
+                <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-secondary flex items-center justify-center text-secondary-foreground text-xs font-bold">
+                        ST
+                    </div>
+                    <div>
+                        <p className="text-xs font-bold text-foreground">Staff Turno</p>
+                        <p className="text-[10px] text-green-500 font-bold uppercase">● Online</p>
+                    </div>
+                </div>
+                {/* Aquí integramos el Toggle que creamos antes */}
+                <ThemeToggle />
             </div>
         </div>
       </aside>
 
+      {/* === MOBILE NAV === */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-card/95 backdrop-blur-md border-t border-border pb-safe pt-2 px-4 shadow-[0_-5px_20px_rgba(0,0,0,0.2)]">
+        <div className="flex justify-between items-center">
+            {routes.slice(0, 5).map((route) => {
+                const isActive = route.exact ? pathname === route.href : pathname.startsWith(route.href)
+                
+                // Botón flotante central en móvil
+                if (route.highlight) {
+                    return (
+                        <Link key={route.href} href={route.href} className="relative -top-6">
+                            <div className="w-14 h-14 rounded-full bg-gradient-to-r from-primary to-accent flex items-center justify-center text-2xl shadow-lg shadow-primary/40 border-4 border-background text-primary-foreground">
+                                {route.icon}
+                            </div>
+                        </Link>
+                    )
+                }
 
-      {/* ==============================================
-          ESTILO MÓVIL (Bottom Navigation)
-          Visible solo en pantallas pequeñas (md:hidden)
-          Fijo abajo.
-         ============================================== */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-slate-900 border-t border-slate-800 flex justify-between items-center px-2 py-2 safe-area-bottom shadow-2xl">
-        {routes.map((route) => {
-            // En móvil mostramos menos items o íconos más grandes. 
-            // Filtramos algunos si son muchos, o usamos scroll horizontal.
-            // Aquí usamos scroll horizontal simple si desborda.
-            const isActive = route.exact 
-                ? pathname === route.href
-                : pathname.startsWith(route.href)
-
-            return (
-              <Link
-                key={route.href}
-                href={route.href}
-                className={`
-                  flex flex-col items-center justify-center min-w-[60px] p-1 rounded-md transition-colors
-                  ${route.highlight 
-                      ? 'bg-green-600 text-white -mt-6 h-14 w-14 rounded-full shadow-lg border-4 border-gray-50' // Efecto botón flotante para CAJA
-                      : isActive 
-                          ? 'text-white' 
-                          : 'text-slate-500 hover:text-slate-300'
-                  }
-                `}
-              >
-                <span className={`${route.highlight ? 'text-2xl' : 'text-xl'}`}>{route.icon}</span>
-                {!route.highlight && (
-                    <span className="text-[9px] font-bold mt-1 uppercase">{route.label.slice(0, 6)}</span>
-                )}
-              </Link>
-            )
-        })}
+                return (
+                <Link
+                    key={route.href}
+                    href={route.href}
+                    className={cn(
+                    "flex flex-col items-center justify-center p-2 rounded-xl transition-all",
+                    isActive ? "text-primary font-bold" : "text-muted-foreground"
+                    )}
+                >
+                    <span className="text-xl mb-0.5">{route.icon}</span>
+                    <span className="text-[9px]">{route.label}</span>
+                </Link>
+                )
+            })}
+             <div className="p-2 opacity-80"><ThemeToggle /></div>
+        </div>
       </nav>
     </>
   )

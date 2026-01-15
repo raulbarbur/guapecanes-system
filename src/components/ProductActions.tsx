@@ -4,11 +4,15 @@
 import { toggleProductStatus } from "@/actions/product-actions"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
+import { cn } from "@/lib/utils"
 
 export default function ProductActions({ id, isActive, stock }: { id: string, isActive: boolean, stock: number }) {
   const router = useRouter()
 
-  const handleToggle = async () => {
+  const handleToggle = async (e: React.MouseEvent) => {
+    e.preventDefault() // Evitar navegación si está dentro de un Link
+    e.stopPropagation()
+
     if (isActive && stock > 0) {
         alert("⚠️ No podés archivar un producto con stock.\nHacé un retiro o ajuste a 0 primero.")
         return
@@ -22,11 +26,12 @@ export default function ProductActions({ id, isActive, stock }: { id: string, is
   }
 
   return (
-    <div className="flex gap-2">
-      {/* Botón EDITAR (Link simple) */}
+    <div className="flex gap-2 justify-center">
+      {/* Botón EDITAR */}
       <Link 
         href={`/products/${id}/edit`} 
-        className="px-3 py-1 bg-blue-100 text-blue-700 rounded text-xs font-bold hover:bg-blue-200"
+        className="px-3 py-1.5 rounded-lg text-xs font-bold transition border border-border hover:bg-accent hover:text-accent-foreground text-muted-foreground"
+        onClick={(e) => e.stopPropagation()}
       >
         EDITAR
       </Link>
@@ -34,12 +39,12 @@ export default function ProductActions({ id, isActive, stock }: { id: string, is
       {/* Botón ARCHIVAR/ACTIVAR */}
       <button
         onClick={handleToggle}
-        className={`px-3 py-1 rounded text-xs font-bold border transition
-          ${isActive 
-            ? 'bg-white text-red-600 border-red-200 hover:bg-red-50' 
-            : 'bg-green-100 text-green-700 border-transparent hover:bg-green-200'
-          }
-        `}
+        className={cn(
+            "px-3 py-1.5 rounded-lg text-xs font-bold border transition",
+            isActive 
+                ? 'border-destructive/30 text-destructive hover:bg-destructive/10' 
+                : 'border-green-500/30 text-green-600 dark:text-green-400 hover:bg-green-500/10'
+        )}
       >
         {isActive ? "ARCHIVAR" : "ACTIVAR"}
       </button>
