@@ -2,7 +2,8 @@
 import { prisma } from "@/lib/prisma"
 import Link from "next/link"
 import AppointmentForm from "@/components/AppointmentForm"
-import AppointmentCard from "@/components/AppointmentCard" // 👈 Importamos
+import AppointmentCard from "@/components/AppointmentCard"
+import { cn } from "@/lib/utils"
 
 interface Props {
   searchParams: Promise<{ date?: string }>
@@ -11,21 +12,17 @@ interface Props {
 export default async function AgendaPage({ searchParams }: Props) {
   const { date } = await searchParams
   
-  // Lógica de fechas
   const todayStr = new Date().toISOString().split('T')[0]
   const selectedDateStr = date || todayStr
 
-  // Rangos de búsqueda (Local Day)
   const startOfDay = new Date(`${selectedDateStr}T00:00:00`)
   const endOfDay = new Date(`${selectedDateStr}T23:59:59`)
 
-  // 1. Datos para el Formulario
   const pets = await prisma.pet.findMany({ 
     orderBy: { name: 'asc' },
     select: { id: true, name: true, breed: true }
   })
 
-  // 2. Datos de Turnos
   const appointments = await prisma.appointment.findMany({
     where: {
       startTime: { gte: startOfDay, lte: endOfDay },
@@ -36,54 +33,54 @@ export default async function AgendaPage({ searchParams }: Props) {
   })
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-8 animate-in fade-in">
       
       {/* HEADER */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
-            <h1 className="text-3xl font-bold text-gray-800">Agenda de Turnos</h1>
-            <p className="text-gray-500 text-sm">Organiza el flujo de trabajo diario.</p>
+            <h1 className="text-3xl font-black text-foreground font-nunito tracking-tight">Agenda de Turnos</h1>
+            <p className="text-sm text-muted-foreground mt-1">Organiza el flujo de trabajo diario.</p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
 
         {/* COLUMNA IZQUIERDA: LISTADO (2/3 de ancho) */}
-        <div className="lg:col-span-2 space-y-4">
+        <div className="lg:col-span-2 space-y-6">
             
             {/* Barra de Fecha */}
-            <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200 flex flex-wrap items-center gap-4 justify-between">
-                <div className="flex items-center gap-2">
-                    <span className="text-xl">📅</span>
-                    <form className="flex gap-2 items-center">
+            <div className="bg-card p-4 rounded-2xl shadow-sm border border-border flex flex-wrap items-center gap-4 justify-between">
+                <div className="flex items-center gap-3">
+                    <span className="text-2xl">📅</span>
+                    <form className="flex gap-3 items-center">
                         <input 
                             type="date" 
                             name="date" 
                             defaultValue={selectedDateStr} 
-                            className="border p-2 rounded text-gray-700 font-medium focus:ring-2 focus:ring-blue-500 outline-none"
+                            className="bg-background border border-input text-foreground rounded-xl px-3 py-2 text-sm font-bold focus:ring-2 focus:ring-primary outline-none [color-scheme:light] dark:[color-scheme:dark]"
                         />
-                        <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded font-bold text-sm hover:bg-blue-700">
+                        <button type="submit" className="bg-secondary hover:bg-accent text-foreground px-4 py-2 rounded-xl font-bold text-sm border border-border transition">
                             Ir
                         </button>
                     </form>
                 </div>
                 
                 {selectedDateStr !== todayStr && (
-                     <Link href="/agenda" className="text-sm font-bold text-blue-600 hover:underline">
+                     <Link href="/agenda" className="text-xs font-bold text-primary hover:underline bg-primary/10 px-3 py-1.5 rounded-lg">
                         Volver a Hoy
                      </Link>
                 )}
             </div>
 
             {/* Grilla de Turnos */}
-            <div className="space-y-3 min-h-[300px]">
+            <div className="space-y-4 min-h-[300px]">
                 {appointments.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center text-gray-400 py-20 bg-gray-50 rounded-lg border border-dashed">
-                        <span className="text-4xl mb-2 opacity-50">😴</span>
-                        <p>No hay turnos para esta fecha.</p>
+                    <div className="flex flex-col items-center justify-center text-muted-foreground py-20 bg-muted/30 rounded-3xl border border-dashed border-border">
+                        <span className="text-5xl mb-4 opacity-50">😴</span>
+                        <p className="font-bold">No hay turnos para esta fecha.</p>
+                        <p className="text-sm">Tomate un descanso o agendá algo nuevo.</p>
                     </div>
                 ) : (
-                    // Renderizamos cada turno usando el componente nuevo
                     appointments.map(appt => (
                         <AppointmentCard key={appt.id} appt={appt} />
                     ))
@@ -93,9 +90,7 @@ export default async function AgendaPage({ searchParams }: Props) {
 
         {/* COLUMNA DERECHA: FORMULARIO (1/3 de ancho) */}
         <div className="lg:col-span-1">
-            <div className="sticky top-6">
-                <AppointmentForm pets={pets} selectedDate={selectedDateStr} />
-            </div>
+            <AppointmentForm pets={pets} selectedDate={selectedDateStr} />
         </div>
 
       </div>

@@ -5,6 +5,7 @@ import { useState } from "react"
 import { exportInventorySheet } from "@/actions/inventory-export-actions"
 import { bulkUpdateStock } from "@/actions/inventory-bulk-actions"
 import readXlsxFile from "read-excel-file"
+import { cn } from "@/lib/utils"
 
 export default function InventoryImporter() {
   const [downloading, setDownloading] = useState(false)
@@ -40,17 +41,13 @@ export default function InventoryImporter() {
     setLogs([])
 
     try {
-        // Mapeo de columnas por índice (A=0, B=1...)
-        // A: ID (0), F: CANTIDAD (5), G: MOTIVO (6)
         const rows = await readXlsxFile(file)
-        
-        // Omitir cabecera
-        const dataRows = rows.slice(1)
+        const dataRows = rows.slice(1) // Omitir cabecera
         
         const payload = dataRows.map(r => ({
             variantId: r[0] as string,
-            quantity: Number(r[5]), // Columna F
-            reason: r[6] as string  // Columna G
+            quantity: Number(r[5]), 
+            reason: r[6] as string  
         })).filter(item => item.variantId && item.quantity !== 0 && !isNaN(item.quantity))
 
         if (payload.length === 0) {
@@ -77,34 +74,48 @@ export default function InventoryImporter() {
         alert("Error leyendo el archivo.")
     } finally {
         setUploading(false)
-        e.target.value = "" // Reset input
+        e.target.value = "" 
     }
   }
 
   return (
-    <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200 mb-8">
-      <h2 className="text-lg font-bold text-gray-800 mb-4">Gestión Masiva de Stock</h2>
+    <div className="space-y-6">
+      <div className="flex flex-col gap-1">
+          <h2 className="text-xl font-bold text-foreground">Gestión Masiva (Excel)</h2>
+          <p className="text-sm text-muted-foreground">Actualizá stock rápidamente descargando la planilla y volviéndola a subir.</p>
+      </div>
       
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
         
         {/* PASO 1: BAJAR */}
-        <div className="border-r md:pr-6 border-gray-100">
-            <p className="text-sm text-gray-500 mb-2">1. Descargá la planilla con tus productos actuales.</p>
+        <div className="bg-primary/5 p-4 rounded-2xl border border-primary/10">
+            <div className="flex items-center gap-2 mb-3">
+                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">1</span>
+                <p className="text-sm font-bold text-foreground">Descargar Planilla</p>
+            </div>
             <button 
                 onClick={handleDownload}
                 disabled={downloading}
-                className="w-full bg-blue-50 text-blue-700 px-4 py-2 rounded font-bold border border-blue-200 hover:bg-blue-100 transition flex items-center justify-center gap-2"
+                className={cn(
+                    "w-full bg-background hover:bg-accent text-foreground px-4 py-3 rounded-xl font-bold border border-border shadow-sm transition flex items-center justify-center gap-2 group",
+                    downloading && "opacity-50 cursor-wait"
+                )}
             >
-                {downloading ? "Generando..." : "📥 Descargar Planilla de Carga"}
+                <span className="text-xl group-hover:scale-110 transition">📥</span>
+                {downloading ? "Generando..." : "Bajar Excel de Stock"}
             </button>
         </div>
 
         {/* PASO 2: SUBIR */}
-        <div>
-            <p className="text-sm text-gray-500 mb-2">2. Subí el Excel con la columna "CANTIDAD" completa.</p>
-            <div className="relative">
+        <div className="bg-green-500/5 p-4 rounded-2xl border border-green-500/10">
+            <div className="flex items-center gap-2 mb-3">
+                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-green-600 text-[10px] font-bold text-white">2</span>
+                <p className="text-sm font-bold text-foreground">Subir Cambios</p>
+            </div>
+            
+            <div className="relative group">
                 {uploading ? (
-                    <div className="text-center py-2 text-sm font-bold text-blue-600 animate-pulse">
+                    <div className="w-full py-3 text-center text-sm font-bold text-green-600 animate-pulse bg-green-500/10 rounded-xl">
                         Procesando movimientos...
                     </div>
                 ) : (
@@ -112,17 +123,39 @@ export default function InventoryImporter() {
                         type="file" 
                         accept=".xlsx"
                         onChange={handleUpload}
-                        className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-green-600 file:text-white hover:file:bg-green-700 cursor-pointer"
+                        className="
+                          block w-full text-sm text-muted-foreground
+                          file:mr-4 file:py-3 file:px-4
+                          file:rounded-xl file:border-0
+                          file:text-sm file:font-bold
+                          file:bg-green-600 file:text-white
+                          hover:file:bg-green-700
+                          cursor-pointer
+                          file:cursor-pointer
+                          file:transition
+                        "
                     />
                 )}
             </div>
         </div>
       </div>
 
-      {/* LOGS */}
+      {/* LOGS TERMINAL */}
       {logs.length > 0 && (
-        <div className="mt-4 bg-gray-900 text-green-400 p-3 rounded text-xs font-mono max-h-32 overflow-y-auto">
-            {logs.map((l, i) => <div key={i}>{l}</div>)}
+        <div className="mt-4 bg-zinc-950 p-4 rounded-xl border border-zinc-800 shadow-inner">
+            <p className="text-[10px] uppercase font-bold text-zinc-500 mb-2 tracking-widest">Consola de Resultados</p>
+            <div className="font-mono text-xs space-y-1 max-h-32 overflow-y-auto custom-scrollbar">
+                {logs.map((l, i) => (
+                    <div key={i} className={cn(
+                        "break-all",
+                        l.includes('❌') ? "text-red-400" : 
+                        l.includes('✅') ? "text-green-400" : 
+                        "text-zinc-300"
+                    )}>
+                        {l}
+                    </div>
+                ))}
+            </div>
         </div>
       )}
     </div>

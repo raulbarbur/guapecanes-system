@@ -4,6 +4,7 @@
 import { createOwner, updateOwner } from "@/actions/owner-actions"
 import { useRouter } from "next/navigation"
 import { useState } from "react"
+import { cn } from "@/lib/utils"
 
 type OwnerData = {
   id?: string
@@ -22,19 +23,15 @@ export default function OwnerForm({ initialData }: { initialData?: OwnerData }) 
     let result;
     
     if (initialData?.id) {
-        // MODO EDICIÓN
         formData.append("id", initialData.id)
         result = await updateOwner(formData)
         if (result.success) {
-            alert("Dueño actualizado")
-            router.push("/owners") // Volver a la lista
+            router.push("/owners") 
             router.refresh()
         }
     } else {
-        // MODO CREACIÓN
         result = await createOwner(formData)
         if (result?.success) {
-            // Limpiamos el form manualmente si es creación
             const form = document.getElementById("owner-form") as HTMLFormElement
             form?.reset()
             router.refresh()
@@ -45,44 +42,47 @@ export default function OwnerForm({ initialData }: { initialData?: OwnerData }) 
     if (result?.error) alert(result.error)
   }
 
+  const inputClass = "w-full p-3 rounded-xl border border-input bg-background text-foreground text-sm focus:ring-2 focus:ring-primary outline-none transition"
+  const labelClass = "block text-xs font-bold text-muted-foreground uppercase mb-1.5"
+
   return (
-    <div className="bg-white p-6 rounded-lg shadow border">
-      <h2 className="text-xl font-bold mb-4">
-        {initialData ? "Editar Dueño" : "Nuevo Dueño"}
+    <div className="bg-card p-6 rounded-3xl shadow-sm border border-border sticky top-6">
+      <h2 className="text-xl font-black text-foreground mb-6 font-nunito flex items-center gap-2">
+        {initialData ? "✏️ Editar Dueño" : "👤 Nuevo Dueño"}
       </h2>
       
-      <form id="owner-form" action={handleSubmit} className="flex flex-col gap-4">
+      <form id="owner-form" action={handleSubmit} className="flex flex-col gap-5">
         
         <div>
-          <label className="text-sm text-gray-600 font-bold">Nombre *</label>
+          <label className={labelClass}>Nombre Completo *</label>
           <input 
             name="name" 
             defaultValue={initialData?.name}
             type="text" 
             required 
-            className="w-full border p-2 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
-            placeholder="Juan Pérez"
+            className={inputClass} 
+            placeholder="Ej: Juan Pérez"
           />
         </div>
 
         <div>
-          <label className="text-sm text-gray-600 font-bold">Email</label>
+          <label className={labelClass}>Email</label>
           <input 
             name="email" 
             defaultValue={initialData?.email || ""}
             type="email" 
-            className="w-full border p-2 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
+            className={inputClass} 
             placeholder="juan@mail.com"
           />
         </div>
 
         <div>
-          <label className="text-sm text-gray-600 font-bold">Teléfono</label>
+          <label className={labelClass}>Teléfono / WhatsApp</label>
           <input 
             name="phone" 
             defaultValue={initialData?.phone || ""}
             type="text" 
-            className="w-full border p-2 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
+            className={inputClass} 
             placeholder="11 1234 5678"
           />
         </div>
@@ -90,11 +90,14 @@ export default function OwnerForm({ initialData }: { initialData?: OwnerData }) 
         <button 
           type="submit" 
           disabled={loading}
-          className={`w-full py-2 rounded text-white font-bold transition
-            ${loading ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}
-          `}
+          className={cn(
+            "w-full py-3 rounded-xl font-bold text-primary-foreground shadow-lg transition active:scale-95 mt-2",
+            loading 
+                ? 'bg-muted text-muted-foreground cursor-wait' 
+                : 'bg-primary hover:bg-primary/90 shadow-primary/25'
+          )}
         >
-          {loading ? "Guardando..." : "Guardar"}
+          {loading ? "Guardando..." : "Guardar Ficha"}
         </button>
       </form>
     </div>
