@@ -5,7 +5,7 @@ generator client {
 }
 
 datasource db {
-  // Usamos PostgreSQL por defecto. Si usas localmente SQLite, cambiá a "sqlite"
+  // Usamos PostgreSQL por defecto.
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
@@ -36,6 +36,19 @@ enum ApptStatus {
   COMPLETED // Servicio terminado
   BILLED    // Ya se cobró en caja
   CANCELLED // Turno cancelado
+}
+
+// ==============================
+// MODELOS DE SISTEMA
+// ==============================
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String   // Hashed
+  name      String
+  role      Role     @default(STAFF)
+  createdAt DateTime @default(now())
 }
 
 // ==============================
@@ -116,7 +129,7 @@ model StockMovement {
   quantity    Int               // Positivo (entrada) o Negativo (salida)
   type        StockMovementType
   reason      String?
-  userId      String            // ID del usuario que hizo la acción (si hubiera auth)
+  userId      String            // ID del usuario que hizo la acción
   createdAt   DateTime          @default(now())
 
   @@index([variantId])

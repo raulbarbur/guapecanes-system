@@ -1,39 +1,30 @@
 // src/app/owners/balance/page.tsx
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
+import { cn } from "@/lib/utils";
 
 export default async function OwnersBalancePage() {
-  // 1. LA CONSULTA MAESTRA ACTUALIZADA
-  // Buscamos dueños, sus ventas pendientes Y sus ajustes pendientes
   const ownersData = await prisma.owner.findMany({
     where: { isActive: true },
     include: {
-      // A. Ventas pendientes (Deuda del Local -> Dueño)
       products: {
         include: {
           variants: {
             include: {
-              saleItems: {
-                where: { isSettled: false },
-              },
+              saleItems: { where: { isSettled: false } },
             },
           },
         },
       },
-      // B. Ajustes pendientes (Deuda del Dueño -> Local, usualmente negativo)
-      balanceAdjustments: {
-        where: { isApplied: false }
-      }
+      balanceAdjustments: { where: { isApplied: false } }
     },
   });
 
-  // 2. PROCESAMIENTO DE DATOS
   const report = ownersData.map((owner) => {
     let debtFromSales = 0;
     let debtFromAdjustments = 0;
     let itemsCount = 0;
 
-    // A. Sumar deuda por ventas (Mercadería vendida y no pagada)
     owner.products.forEach((product) => {
       product.variants.forEach((variant) => {
         variant.saleItems.forEach((item) => {
@@ -43,13 +34,10 @@ export default async function OwnersBalancePage() {
       });
     });
 
-    // B. Sumar deuda por ajustes (Devoluciones de ventas ya pagadas)
     owner.balanceAdjustments.forEach(adjustment => {
       debtFromAdjustments += Number(adjustment.amount);
     });
 
-    // C. Deuda Neta Total (Suma algebraica)
-    // Ejemplo: Ventas ($1000) + Devolución (-$200) = Total a Pagar ($800)
     const totalDebt = debtFromSales + debtFromAdjustments;
 
     return {
@@ -62,102 +50,119 @@ export default async function OwnersBalancePage() {
     };
   });
 
-  // Filtramos: Mostramos si hay deuda O si hay saldo a favor del local (deuda negativa)
   const ownersWithActivity = report
     .filter((r) => r.totalDebt !== 0)
     .sort((a, b) => b.totalDebt - a.totalDebt);
 
   const ownersClean = report.filter((r) => r.totalDebt === 0);
+  const totalGlobal = report.reduce((sum, r) => sum + r.totalDebt, 0);
 
   return (
-    <div className="p-10 max-w-5xl mx-auto">
-      <div className="flex justify-between items-center mb-8">
-        <h1 className="text-3xl font-bold">
-          Estado de Cuenta
-        </h1>
-        <div className="bg-slate-800 text-white px-6 py-3 rounded-lg font-bold shadow-lg">
-          Total a Pagar: $
-          {report.reduce((sum, r) => sum + r.totalDebt, 0).toLocaleString()}
+    <div className="p-6 md:p-8 max-w-6xl mx-auto space-y-8 animate-in fade-in">
+      
+      {/* HEADER + KPI */}
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div>
+            <h1 className="text-3xl font-black text-foreground font-nunito tracking-tight">Estado de Cuenta</h1>
+            <p className="text-sm text-muted-foreground mt-1">Saldos pendientes a dueños y proveedores.</p>
+        </div>
+        
+        <div className="bg-foreground text-background px-6 py-4 rounded-2xl shadow-xl border border-border">
+            <p className="text-[10px] uppercase font-bold tracking-widest opacity-80 mb-1">Deuda Total Local</p>
+            <p className="text-3xl font-black font-nunito tracking-tight">${totalGlobal.toLocaleString()}</p>
         </div>
       </div>
 
       {/* TABLA DE DEUDAS */}
-      <div className="bg-white rounded-lg shadow overflow-hidden border mb-10">
-        <table className="w-full text-left">
-          <thead className="bg-gray-100 text-gray-600 uppercase text-xs font-bold border-b">
-            <tr>
-              <th className="p-4">Dueño</th>
-              <th className="p-4 text-center">Items Pend.</th>
-              <th className="p-4 text-right">Saldo Neto</th>
-              <th className="p-4 text-center">Acción</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {ownersWithActivity.map((row) => (
-              <tr key={row.ownerId} className="hover:bg-blue-50 transition">
-                <td className="p-4">
-                  <p className="font-bold text-lg text-gray-800">{row.name}</p>
-                  <p className="text-xs text-gray-500">
-                    {row.phone || "Sin teléfono"}
-                  </p>
-                  {row.hasAdjustments && (
-                    <span className="text-[10px] bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded border border-yellow-200 inline-block mt-1">
-                      ⚠️ Incluye ajustes/devoluciones
-                    </span>
-                  )}
-                </td>
-                
-                <td className="p-4 text-center font-mono text-lg text-gray-600">
-                  {row.itemsCount}
-                </td>
-                
-                <td className="p-4 text-right">
-                  <span className={`text-xl font-bold ${row.totalDebt >= 0 ? 'text-red-600' : 'text-green-600'}`}>
-                    ${row.totalDebt.toLocaleString()}
-                  </span>
-                  {row.totalDebt < 0 && (
-                     <p className="text-xs text-green-600 font-bold">Saldo a favor Local</p>
-                  )}
-                </td>
-                
-                <td className="p-4 text-center">
-                  <Link
-                    href={`/owners/settlement/${row.ownerId}`}
-                    className="bg-indigo-600 text-white px-4 py-2 rounded text-sm hover:bg-indigo-700 shadow inline-block font-medium"
-                  >
-                    Ver Detalle
-                  </Link>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="bg-card rounded-3xl shadow-sm overflow-hidden border border-border">
+        <div className="overflow-x-auto">
+            <table className="w-full text-left">
+            <thead className="bg-muted/50 text-muted-foreground uppercase text-xs font-bold">
+                <tr>
+                    <th className="p-5 pl-6">Dueño</th>
+                    <th className="p-5 text-center">Items Pend.</th>
+                    <th className="p-5 text-right">Saldo Neto</th>
+                    <th className="p-5 text-center">Acción</th>
+                </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+                {ownersWithActivity.map((row) => (
+                <tr key={row.ownerId} className="hover:bg-muted/30 transition duration-200">
+                    <td className="p-5 pl-6">
+                        <p className="font-bold text-lg text-foreground">{row.name}</p>
+                        <p className="text-xs text-muted-foreground font-medium">
+                            {row.phone || "Sin teléfono"}
+                        </p>
+                        {row.hasAdjustments && (
+                            <span className="text-[10px] bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 px-2 py-0.5 rounded border border-yellow-500/20 inline-block mt-2 font-bold">
+                            ⚠️ Incluye ajustes manuales
+                            </span>
+                        )}
+                    </td>
+                    
+                    <td className="p-5 text-center">
+                        <span className="bg-secondary text-secondary-foreground px-3 py-1 rounded-lg text-sm font-bold">
+                            {row.itemsCount}
+                        </span>
+                    </td>
+                    
+                    <td className="p-5 text-right">
+                        <span className={cn(
+                            "text-xl font-black font-mono",
+                            row.totalDebt >= 0 
+                                ? 'text-destructive dark:text-red-400' 
+                                : 'text-green-600 dark:text-green-400'
+                        )}>
+                            ${row.totalDebt.toLocaleString()}
+                        </span>
+                        {row.totalDebt < 0 && (
+                            <p className="text-[10px] text-green-600 dark:text-green-400 font-bold uppercase mt-1">Saldo a favor Local</p>
+                        )}
+                    </td>
+                    
+                    <td className="p-5 text-center">
+                        <Link
+                            href={`/owners/settlement/${row.ownerId}`}
+                            className="bg-primary/10 text-primary hover:bg-primary/20 px-4 py-2 rounded-xl text-sm font-bold border border-primary/10 transition shadow-sm"
+                        >
+                            Ver Detalle
+                        </Link>
+                    </td>
+                </tr>
+                ))}
+            </tbody>
+            </table>
+        </div>
 
         {ownersWithActivity.length === 0 && (
-          <div className="p-10 text-center text-gray-500 text-lg">
-            ✅ ¡Todo al día! No hay saldos pendientes.
+          <div className="p-12 text-center text-muted-foreground bg-muted/20">
+            <span className="text-4xl block mb-2 opacity-50">🎉</span>
+            ¡Todo al día! No hay saldos pendientes.
           </div>
         )}
       </div>
 
       {/* DUEÑOS AL DÍA */}
       {ownersClean.length > 0 && (
-        <details className="mt-8">
-          <summary className="cursor-pointer text-gray-500 font-medium hover:text-gray-700 select-none">
-            Ver dueños sin saldo pendiente ({ownersClean.length})
-          </summary>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 opacity-75">
-            {ownersClean.map((o) => (
-              <div
-                key={o.ownerId}
-                className="border p-3 rounded bg-gray-50 text-sm flex justify-between"
-              >
-                <span>{o.name}</span>
-                <span className="text-green-600 font-bold">✓</span>
-              </div>
-            ))}
-          </div>
-        </details>
+        <div className="bg-card/50 p-6 rounded-3xl border border-border border-dashed">
+            <details className="group">
+                <summary className="cursor-pointer text-muted-foreground font-bold hover:text-foreground select-none flex items-center gap-2">
+                    <span>Ver dueños sin saldo pendiente ({ownersClean.length})</span>
+                    <span className="transition-transform group-open:rotate-180">▼</span>
+                </summary>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
+                    {ownersClean.map((o) => (
+                    <div
+                        key={o.ownerId}
+                        className="p-3 rounded-xl bg-background border border-border text-sm flex justify-between items-center opacity-70 hover:opacity-100 transition"
+                    >
+                        <span className="font-medium">{o.name}</span>
+                        <span className="text-green-500 font-bold">✓</span>
+                    </div>
+                    ))}
+                </div>
+            </details>
+        </div>
       )}
     </div>
   );
