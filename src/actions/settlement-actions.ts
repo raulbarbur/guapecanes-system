@@ -4,6 +4,7 @@
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
+import { getSession } from "@/lib/auth"
 
 type SettlementItemInput = {
   id: string
@@ -11,7 +12,16 @@ type SettlementItemInput = {
   quantity?: number 
 }
 
+// R-06: Helper de redondeo para moneda
+const round = (num: number) => Math.round(num * 100) / 100
+
 export async function createSettlement(formData: FormData) {
+  // R-01: Blindaje de seguridad
+  const session = await getSession()
+  if (!session || session.role !== 'ADMIN') {
+    return { error: "Requiere permisos de Administrador para liquidar." }
+  }
+
   const ownerId = formData.get("ownerId") as string
   const selectionJson = formData.get("selection") as string
   
@@ -49,23 +59,20 @@ export async function createSettlement(formData: FormData) {
                 throw new Error(`Cantidad inválida para item ${item.id}`)
             }
 
-            // Buscamos item + VENTA PADRE para verificar estado
             const dbItem = await tx.saleItem.findUnique({
                 where: { id: item.id },
                 include: { 
                     variant: { include: { product: true } },
-                    sale: true // 👈 Necesario para validar paymentStatus
+                    sale: true 
                 }
             })
 
             if (!dbItem) throw new Error(`Item de venta no encontrado: ${item.id}`)
             
-            // VALIDACIONES
             if (dbItem.variant?.product.ownerId !== ownerId) {
                 throw new Error(`El item ${dbItem.description} no pertenece a este dueño.`)
             }
 
-            // ⛔ REGLA DE NEGOCIO CRÍTICA ⛔
             if (dbItem.sale.paymentStatus !== 'PAID') {
                 throw new Error(`No se puede liquidar "${dbItem.description}" porque el cliente AÚN NO PAGÓ (Es Fiado).`)
             }
@@ -75,9 +82,9 @@ export async function createSettlement(formData: FormData) {
                 throw new Error(`Error en ${dbItem.description}: Intentás pagar ${item.quantity} pero solo se deben ${pendingQty}.`)
             }
 
-            // Cálculos
-            const lineAmount = Number(dbItem.costAtSale) * item.quantity
-            calculatedTotal += lineAmount
+            // R-06: Cálculo con Redondeo
+            const lineAmount = round(Number(dbItem.costAtSale) * item.quantity)
+            calculatedTotal = round(calculatedTotal + lineAmount)
 
             await tx.settlementLine.create({
                 data: {
@@ -102,7 +109,9 @@ export async function createSettlement(formData: FormData) {
             if (dbAdj.ownerId !== ownerId) throw new Error("Ajuste ajeno.")
             if (dbAdj.isApplied) throw new Error("Este ajuste ya fue pagado.")
 
-            calculatedTotal += Number(dbAdj.amount)
+            // R-06: Redondeo de ajuste
+            const adjAmount = Number(dbAdj.amount)
+            calculatedTotal = round(calculatedTotal + adjAmount)
 
             await tx.balanceAdjustment.update({
                 where: { id: dbAdj.id },

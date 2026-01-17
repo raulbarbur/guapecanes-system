@@ -6,9 +6,12 @@ import ExcelJS from "exceljs"
 import { getSession } from "@/lib/auth"
 
 export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
-  // R-01 / S-01: Blindaje de seguridad (aunque sea R-02, protegemos el endpoint)
+  // R-01: Blindaje de seguridad RBAC
   const session = await getSession()
-  if (!session) return { success: false, error: "No autorizado" }
+  // Validamos existencia de sesión Y rol de administrador
+  if (!session || session.role !== 'ADMIN') {
+    return { success: false, error: "Requiere permisos de Administrador." }
+  }
 
   try {
     // 1. Crear Libro y Hoja
@@ -37,7 +40,6 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
     // 3. Si es FULL, llenamos con datos
     if (mode === 'FULL') {
       // R-02: Límite de seguridad para prevenir OOM (Out of Memory)
-      // Se limita a 2000 productos para garantizar que el buffer de Node.js no colapse.
       const SAFE_LIMIT = 2000 
       
       const products = await prisma.product.findMany({
@@ -67,8 +69,6 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
     }
 
     // 4. Generar Buffer y convertir a Base64
-    // R-02: Envolvemos la operación pesada en un bloque específico si fuera necesario,
-    // pero el try/catch global ya captura fallos de memoria aquí.
     const buffer = await workbook.xlsx.writeBuffer()
     const base64 = Buffer.from(buffer).toString("base64")
     
@@ -80,7 +80,6 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
 
   } catch (error) {
     console.error("Error exportando:", error)
-    // Mensaje genérico para el usuario, log detallado para el admin
     return { success: false, error: "Error al generar el archivo Excel (Posible exceso de datos)." }
   }
 }

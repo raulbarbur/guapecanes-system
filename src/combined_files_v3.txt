@@ -66,17 +66,27 @@ export const config = {
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
 import { buildArgentinaDate } from "@/lib/utils"
+import { getSession } from "@/lib/auth"
 
 type ApptStatus = 'PENDING' | 'CONFIRMED' | 'COMPLETED' | 'BILLED' | 'CANCELLED'
 
 export async function createAppointment(formData: FormData) {
+  const session = await getSession()
+  if (!session) return { error: "No autorizado" }
+
   const petId = formData.get("petId") as string
   const dateStr = formData.get("date") as string // "2024-01-20"
   const timeStr = formData.get("time") as string // "14:30"
+  // Si no viene o es 0/NaN, asume 60. Si viene un número negativo o gigante, lo captura la variable.
   const duration = parseInt(formData.get("duration") as string) || 60 
 
   if (!petId || !dateStr || !timeStr) {
     return { error: "Faltan datos (Mascota, Fecha u Hora)" }
+  }
+
+  // R-04: Validación de rango de duración
+  if (duration <= 0 || duration > 480) {
+      return { error: "La duración del turno debe ser entre 1 y 480 minutos." }
   }
 
   try {
@@ -138,6 +148,9 @@ export async function createAppointment(formData: FormData) {
 }
 
 export async function cancelAppointment(formData: FormData) {
+    const session = await getSession()
+    if (!session) return { error: "No autorizado" }
+
     const id = formData.get("id") as string
 
     if (!id) return { error: "ID no provisto" }
@@ -178,6 +191,9 @@ export async function cancelAppointment(formData: FormData) {
 }
 
 export async function updateAppointmentStatus(id: string, newStatus: ApptStatus) {
+    const session = await getSession()
+    if (!session) return { error: "No autorizado" }
+
     try {
         // 1. LEER ESTADO ACTUAL
         const currentAppt = await prisma.appointment.findUnique({
@@ -433,8 +449,13 @@ export async function importSingleProduct(data: ImportRow) {
 
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
+import { getSession } from "@/lib/auth"
 
 export async function createCategory(formData: FormData) {
+  const session = await getSession()
+  // Mantenemos la estructura de error consistente con este archivo
+  if (!session) return { success: false, error: "No autorizado" }
+
   const name = formData.get("name") as string
 
   if (!name) return
@@ -555,9 +576,25 @@ export async function markSaleAsPaid(saleId: string) {
     if (!session) return { error: "No autorizado" }
 
     try {
+        // R-03: Leer antes de escribir para idempotencia
+        const currentSale = await prisma.sale.findUnique({
+            where: { id: saleId },
+            select: { paymentStatus: true }
+        })
+
+        if (!currentSale) return { error: "Venta no encontrada" }
+
+        if (currentSale.paymentStatus === 'PAID') {
+            // Ya estaba paga, retornamos éxito silencioso
+            return { success: true, message: "Venta ya estaba cobrada previamente" }
+        }
+
         await prisma.sale.update({
             where: { id: saleId },
-            data: { paymentStatus: 'PAID' }
+            data: { 
+                paymentStatus: 'PAID',
+                paidAt: new Date() // El dinero entra HOY
+            }
         })
 
         // Revalidamos todo lo necesario
@@ -578,8 +615,13 @@ export async function markSaleAsPaid(saleId: string) {
 
 import { prisma } from "@/lib/prisma"
 import ExcelJS from "exceljs"
+import { getSession } from "@/lib/auth"
 
 export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
+  // R-01 / S-01: Blindaje de seguridad (aunque sea R-02, protegemos el endpoint)
+  const session = await getSession()
+  if (!session) return { success: false, error: "No autorizado" }
+
   try {
     // 1. Crear Libro y Hoja
     const workbook = new ExcelJS.Workbook()
@@ -606,6 +648,10 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
 
     // 3. Si es FULL, llenamos con datos
     if (mode === 'FULL') {
+      // R-02: Límite de seguridad para prevenir OOM (Out of Memory)
+      // Se limita a 2000 productos para garantizar que el buffer de Node.js no colapse.
+      const SAFE_LIMIT = 2000 
+      
       const products = await prisma.product.findMany({
         where: { isActive: true }, // Solo activos
         include: {
@@ -613,7 +659,8 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
           owner: true,
           variants: true
         },
-        orderBy: { name: 'asc' }
+        orderBy: { name: 'asc' },
+        take: SAFE_LIMIT // 👈 Límite preventivo
       })
 
       // APLANAMOS LA DATA (Flatten)
@@ -632,7 +679,8 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
     }
 
     // 4. Generar Buffer y convertir a Base64
-    // (Server Actions no pueden retornar Streams directamente al cliente fácilmente todavía)
+    // R-02: Envolvemos la operación pesada en un bloque específico si fuera necesario,
+    // pero el try/catch global ya captura fallos de memoria aquí.
     const buffer = await workbook.xlsx.writeBuffer()
     const base64 = Buffer.from(buffer).toString("base64")
     
@@ -644,7 +692,8 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
 
   } catch (error) {
     console.error("Error exportando:", error)
-    return { success: false, error: "Error al generar el archivo Excel." }
+    // Mensaje genérico para el usuario, log detallado para el admin
+    return { success: false, error: "Error al generar el archivo Excel (Posible exceso de datos)." }
   }
 }
 
@@ -988,8 +1037,12 @@ export async function updateOwner(formData: FormData) {
 
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
+import { getSession } from "@/lib/auth"
 
 export async function createPet(formData: FormData) {
+  const session = await getSession()
+  if (!session) return { error: "No autorizado" }
+
   const name = formData.get("name") as string
   const breed = formData.get("breed") as string
   const ownerName = formData.get("ownerName") as string
@@ -1022,6 +1075,9 @@ export async function createPet(formData: FormData) {
 }
 
 export async function deletePet(id: string) {
+    const session = await getSession()
+    if (!session) return { error: "No autorizado" }
+
     try {
         await prisma.pet.delete({ where: { id } })
         revalidatePath("/pets")
@@ -1450,6 +1506,20 @@ export async function markSaleAsPaid(saleId: string) {
     if (!session) return { error: "No autorizado" }
 
     try {
+        // R-03: Leer antes de escribir para idempotencia
+        const currentSale = await prisma.sale.findUnique({
+          where: { id: saleId },
+          select: { paymentStatus: true }
+        })
+
+        if (!currentSale) return { error: "Venta no encontrada" }
+        
+        if (currentSale.paymentStatus === 'PAID') {
+          // Ya está cobrada, devolvemos success para no romper flujo cliente, 
+          // pero avisamos en consola o simplemente no hacemos nada.
+          return { success: true, message: "Venta ya estaba cobrada previamente" }
+        }
+
         await prisma.sale.update({
             where: { id: saleId },
             data: {
@@ -8239,6 +8309,87 @@ export async function getOwnerBalance(ownerId: string): Promise<OwnerBalance> {
     pendingItemsCount
   }
 }
+
+--- File: prisma.config.ts (in subfolder: TEMP) ---
+
+// This file was generated by Prisma, and assumes you have installed the following:
+// npm install --save-dev prisma dotenv
+import "dotenv/config";
+import { defineConfig } from "prisma/config";
+
+export default defineConfig({
+  schema: "prisma/schema.prisma",
+  migrations: {
+    path: "prisma/migrations",
+  },
+  datasource: {
+    url: process.env["DATABASE_URL"],
+  },
+});
+
+
+--- File: tailwind.config.ts (in subfolder: TEMP) ---
+
+import type { Config } from "tailwindcss";
+
+const config: Config = {
+  darkMode: ["class"], // Importante: Activación manual por clase css
+  content: [
+    "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
+    "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
+    "./src/app/**/*.{js,ts,jsx,tsx,mdx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        border: "hsl(var(--border))",
+        input: "hsl(var(--input))",
+        ring: "hsl(var(--ring))",
+        background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))",
+        primary: {
+          DEFAULT: "hsl(var(--primary))",
+          foreground: "hsl(var(--primary-foreground))",
+        },
+        secondary: {
+          DEFAULT: "hsl(var(--secondary))",
+          foreground: "hsl(var(--secondary-foreground))",
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--destructive))",
+          foreground: "hsl(var(--destructive-foreground))",
+        },
+        muted: {
+          DEFAULT: "hsl(var(--muted))",
+          foreground: "hsl(var(--muted-foreground))",
+        },
+        accent: {
+          DEFAULT: "hsl(var(--accent))",
+          foreground: "hsl(var(--accent-foreground))",
+        },
+        popover: {
+          DEFAULT: "hsl(var(--popover))",
+          foreground: "hsl(var(--popover-foreground))",
+        },
+        card: {
+          DEFAULT: "hsl(var(--card))",
+          foreground: "hsl(var(--card-foreground))",
+        },
+      },
+      borderRadius: {
+        lg: "var(--radius)",
+        md: "calc(var(--radius) - 2px)",
+        sm: "calc(var(--radius) - 4px)",
+      },
+      fontFamily: {
+        sans: ["var(--font-inter)"],
+        nunito: ["var(--font-nunito)"],
+      },
+    },
+  },
+  plugins: [],
+};
+export default config;
 
 --- File: schema.prisma (in subfolder: TEMP\prisma) ---
 

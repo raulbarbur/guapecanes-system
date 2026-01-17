@@ -6,6 +6,8 @@ import { createAppointment } from "@/actions/appointment-actions"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
+// R-08: Importar hook de notificaciones
+import { useToast } from "@/components/ui/Toast"
 
 type Props = {
   pets: { id: string, name: string, breed: string | null }[]
@@ -15,6 +17,8 @@ type Props = {
 export default function AppointmentForm({ pets, selectedDate }: Props) {
   const [loading, setLoading] = useState(false)
   const router = useRouter()
+  // R-08: Inicializar toast
+  const { addToast } = useToast()
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault() 
@@ -27,16 +31,16 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
 
     setLoading(false)
 
+    // R-08: Reemplazo de alerts
     if (result.error) {
-      alert("❌ NO SE PUDO AGENDAR:\n" + result.error)
+      addToast(result.error, "error")
     } else {
-      alert("✅ Turno agendado correctamente")
+      addToast("Turno agendado correctamente.", "success")
       form.reset() 
       router.refresh()
     }
   }
 
-  // Clases compartidas
   const labelClass = "block text-xs font-bold text-muted-foreground uppercase mb-1.5"
   const inputClass = "w-full p-2.5 rounded-xl border border-input bg-background text-foreground text-sm font-medium focus:ring-2 focus:ring-primary outline-none transition [color-scheme:light] dark:[color-scheme:dark]"
 
@@ -47,8 +51,6 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
       </h2>
       
       <form onSubmit={handleSubmit} className="space-y-5">
-        
-        {/* MASCOTA */}
         <div>
           <div className="flex justify-between items-center mb-1.5">
             <label className={labelClass}>Mascota</label>
@@ -63,29 +65,14 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
             ))}
           </select>
         </div>
-
-        {/* FECHA */}
         <div>
             <label className={labelClass}>Fecha</label>
-            <input 
-                type="date" 
-                name="date"
-                defaultValue={selectedDate}
-                required
-                className={inputClass}
-            />
+            <input type="date" name="date" defaultValue={selectedDate} required className={inputClass} />
         </div>
-
-        {/* HORA Y DURACIÓN */}
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className={labelClass}>Hora Inicio</label>
-            <input 
-              name="time" 
-              type="time" 
-              required 
-              className={inputClass}
-            />
+            <input name="time" type="time" required className={inputClass} />
           </div>
           <div>
             <label className={labelClass}>Duración</label>
@@ -98,17 +85,7 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
             </select>
           </div>
         </div>
-
-        <button 
-          type="submit" 
-          disabled={loading}
-          className={cn(
-            "w-full py-3 rounded-xl font-bold transition text-primary-foreground shadow-lg active:scale-95 mt-2",
-            loading 
-                ? 'bg-muted text-muted-foreground cursor-wait' 
-                : 'bg-primary hover:bg-primary/90 shadow-primary/25'
-          )}
-        >
+        <button type="submit" disabled={loading} className={cn("w-full py-3 rounded-xl font-bold transition text-primary-foreground shadow-lg active:scale-95 mt-2", loading ? 'bg-muted text-muted-foreground cursor-wait' : 'bg-primary hover:bg-primary/90 shadow-primary/25')}>
           {loading ? "Verificando..." : "Confirmar Reserva"}
         </button>
       </form>
