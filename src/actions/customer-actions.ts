@@ -70,15 +70,32 @@ export async function deleteCustomer(formData: FormData) {
   if (!id) return { error: "ID requerido" }
 
   try {
+    // 1. VERIFICACIÓN DE DEUDA (R-05)
+    // Buscamos específicamente ventas "fiadas" que no han sido pagadas.
+    const pendingDebts = await prisma.sale.count({
+        where: {
+            customerId: id,
+            paymentStatus: 'PENDING'
+        }
+    })
+
+    if (pendingDebts > 0) {
+        return { error: "⛔ No se puede eliminar: El cliente tiene deuda activa (Fiado). Debe saldarla o anular las ventas antes de borrar." }
+    }
+
+    // 2. VERIFICACIÓN DE HISTORIAL GENERAL
+    // Si no tiene deuda pero tiene historial, tampoco borramos (integridad DB),
+    // pero el mensaje es diferente.
     const customerWithHistory = await prisma.customer.findUnique({
         where: { id },
         include: { _count: { select: { sales: true } } }
     })
 
     if (customerWithHistory && customerWithHistory._count.sales > 0) {
-        return { error: "⛔ No se puede eliminar: El cliente tiene historial de compras." }
+        return { error: "⛔ No se puede eliminar: El cliente tiene historial de compras asociado." }
     }
 
+    // 3. EJECUCIÓN
     await prisma.customer.delete({ where: { id } })
     
     revalidatePath("/customers")
@@ -91,13 +108,12 @@ export async function deleteCustomer(formData: FormData) {
   }
 }
 
-// 👇 NUEVA FUNCIÓN: COBRAR DEUDA
+// FUNCION COBRAR DEUDA
 export async function markSaleAsPaid(saleId: string) {
     const session = await getSession()
     if (!session) return { error: "No autorizado" }
 
     try {
-        // R-03: Leer antes de escribir para idempotencia
         const currentSale = await prisma.sale.findUnique({
             where: { id: saleId },
             select: { paymentStatus: true }
@@ -106,7 +122,6 @@ export async function markSaleAsPaid(saleId: string) {
         if (!currentSale) return { error: "Venta no encontrada" }
 
         if (currentSale.paymentStatus === 'PAID') {
-            // Ya estaba paga, retornamos éxito silencioso
             return { success: true, message: "Venta ya estaba cobrada previamente" }
         }
 
@@ -114,15 +129,12 @@ export async function markSaleAsPaid(saleId: string) {
             where: { id: saleId },
             data: { 
                 paymentStatus: 'PAID',
-                paidAt: new Date() // El dinero entra HOY
+                paidAt: new Date()
             }
         })
 
-        // Revalidamos todo lo necesario
         revalidatePath("/customers")
-        revalidatePath("/sales") // Para que en el historial general salga verde
-        // Nota: Como no sabemos el ID del cliente aquí sin hacer query extra, 
-        // nextjs revalidará la ruta actual donde se invoque la acción.
+        revalidatePath("/sales") 
         return { success: true }
     } catch (error) {
         return { error: "Error al registrar el pago." }

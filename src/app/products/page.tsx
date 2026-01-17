@@ -2,7 +2,7 @@
 import { prisma } from "@/lib/prisma"
 import ProductForm from "@/components/ProductForm"
 import ProductActions from "@/components/ProductActions"
-import SearchInput from "@/components/SearchInput" // Asegurate de que SearchInput no tenga bg-white hardcodeado
+import SearchInput from "@/components/SearchInput" 
 import Link from "next/link"
 
 interface Props {
@@ -14,6 +14,9 @@ interface Props {
 export default async function ProductsPage({ searchParams }: Props) {
   const params = await searchParams
   const query = params?.query || ""
+
+  // R-02: Feature Flag
+  const showImages = process.env.NEXT_PUBLIC_ENABLE_IMAGES === 'true'
 
   const owners = await prisma.owner.findMany({ select: { id: true, name: true } })
   const categories = await prisma.category.findMany({ select: { id: true, name: true } })
@@ -60,10 +63,9 @@ export default async function ProductsPage({ searchParams }: Props) {
 
       <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
         
-        {/* COLUMNA IZQUIERDA: FORMULARIO (Sticky en desktop grande) */}
+        {/* COLUMNA IZQUIERDA: FORMULARIO */}
         <div className="xl:col-span-1">
           <div className="xl:sticky xl:top-6">
-             {/* Barra de Búsqueda Móvil (si se quiere sacar de la tabla) */}
              <div className="mb-6 xl:hidden">
                 <SearchInput placeholder="Buscar por producto..." />
              </div>
@@ -74,7 +76,6 @@ export default async function ProductsPage({ searchParams }: Props) {
         {/* COLUMNA DERECHA: TABLA */}
         <div className="xl:col-span-3 flex flex-col gap-4">
             
-            {/* Buscador Desktop */}
             <div className="hidden xl:block max-w-md">
                 <SearchInput placeholder="Buscar por producto, dueño o categoría..." />
             </div>
@@ -109,10 +110,11 @@ export default async function ProductsPage({ searchParams }: Props) {
                             <td className="px-6 py-4">
                                 <Link href={`/products/${p.id}`} className="flex items-center gap-4 group-hover:translate-x-1 transition-transform">
                                     <div className="w-12 h-12 rounded-lg bg-muted border border-border overflow-hidden shrink-0 flex items-center justify-center">
-                                        {mainImage ? (
+                                        {/* R-02: Icono genérico si no hay imágenes o si la imagen falla */}
+                                        {showImages && mainImage ? (
                                             <img src={mainImage} className="w-full h-full object-cover" alt={p.name} />
                                         ) : (
-                                            <span className="text-[10px] font-bold text-muted-foreground">FOTO</span>
+                                            <span className="text-xl">📦</span>
                                         )}
                                     </div>
                                     <div>

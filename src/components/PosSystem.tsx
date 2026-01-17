@@ -14,6 +14,9 @@ export default function PosSystem({ products, customers }: { products: ProductGr
     handleProductClick, addVariantToCart, removeFromCart, updateServicePrice, checkout
   } = usePos(products, customers)
 
+  // R-02: Feature Flag para imágenes
+  const showImages = process.env.NEXT_PUBLIC_ENABLE_IMAGES === 'true'
+
   // NUEVO: RENDERIZADO CONDICIONAL POR MÉTODO
   if (lastSale) {
     if (lastSale.method === 'CHECKING_ACCOUNT') {
@@ -52,7 +55,6 @@ export default function PosSystem({ products, customers }: { products: ProductGr
     )
   }
 
-  // ... (El resto del componente sigue IGUAL, copio solo el inicio para contexto)
   return (
     <>
     <div className="flex flex-col md:flex-row h-[calc(100vh-80px)] md:h-[calc(100vh-20px)] gap-6 pb-4 md:pb-0">
@@ -131,27 +133,30 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                                     : "bg-card border-border hover:border-primary hover:shadow-lg hover:shadow-primary/10 hover:-translate-y-1"
                             )}
                         >
-                            <div className="w-full aspect-square bg-muted rounded-xl overflow-hidden relative mb-3">
-                                {p.imageUrl ? (
-                                    <Image 
-                                        src={p.imageUrl} 
-                                        alt={p.name} 
-                                        fill
-                                        className="object-cover transition-transform duration-500 group-hover:scale-110"
-                                        sizes="(max-width: 768px) 50vw, 20vw"
-                                    />
-                                ) : (
-                                    <div className="w-full h-full flex items-center justify-center text-xs text-muted-foreground font-bold bg-secondary">
-                                        Sin Foto
+                            {/* R-02: Renderizado Condicional de la Imagen */}
+                            {showImages && (
+                                <div className="w-full aspect-square bg-muted rounded-xl overflow-hidden relative mb-3">
+                                    {p.imageUrl ? (
+                                        <Image 
+                                            src={p.imageUrl} 
+                                            alt={p.name} 
+                                            fill
+                                            className="object-cover transition-transform duration-500 group-hover:scale-110"
+                                            sizes="(max-width: 768px) 50vw, 20vw"
+                                        />
+                                    ) : (
+                                        <div className="w-full h-full flex items-center justify-center text-xs text-muted-foreground font-bold bg-secondary">
+                                            Sin Foto
+                                        </div>
+                                    )}
+                                    <div className={cn(
+                                        "absolute top-2 right-2 px-2 py-0.5 rounded-md text-[10px] font-black text-white shadow-sm z-10",
+                                        stockColor
+                                    )}>
+                                        {p.totalStock}
                                     </div>
-                                )}
-                                <div className={cn(
-                                    "absolute top-2 right-2 px-2 py-0.5 rounded-md text-[10px] font-black text-white shadow-sm z-10",
-                                    stockColor
-                                )}>
-                                    {p.totalStock}
                                 </div>
-                            </div>
+                            )}
                             
                             <div className="flex-1 min-w-0">
                                 <h3 className="font-bold text-foreground text-sm leading-tight line-clamp-2 mb-1 group-hover:text-primary transition-colors">
@@ -170,6 +175,13 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                                 ) : (
                                     <span className="text-primary font-black text-lg">
                                         ${p.variants[0]?.price || 0}
+                                    </span>
+                                )}
+                                
+                                {/* R-02: Si no hay imagen, mostramos stock aquí para que sea visible */}
+                                {!showImages && !isOOS && (
+                                    <span className={cn("text-[9px] font-bold px-1.5 py-0.5 rounded text-white", stockColor)}>
+                                        {p.totalStock}u
                                     </span>
                                 )}
                             </div>

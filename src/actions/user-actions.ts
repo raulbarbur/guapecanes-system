@@ -4,10 +4,10 @@
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
 import { Role } from "@prisma/client"
-import { hashPassword, getSession } from "@/lib/auth" // 👈 Importamos getSession
+import { hashPassword, getSession } from "@/lib/auth" 
 
 export async function createUser(formData: FormData) {
-  // 1. SEGURIDAD (R-03)
+  // 1. SEGURIDAD (R-01) - Mantenemos validación existente y reforzada
   const session = await getSession()
   if (!session) return { error: "No autorizado." }
   if (session.role !== 'ADMIN') return { error: "Permisos insuficientes. Se requiere Administrador." }
@@ -73,6 +73,13 @@ export async function deleteUser(formData: FormData) {
     if (!session || session.role !== 'ADMIN') return { error: "No autorizado." }
 
     const id = formData.get("id") as string
+    
+    // R-01 Adicional: Evitar auto-eliminación
+    // Asumimos que session tiene 'id' dado que es un objeto User o derivado.
+    if (session.userId && session.userId === id) {
+        return { error: "No puedes eliminar tu propio usuario." }
+    }
+
     try {
         await prisma.user.delete({ where: { id } })
         revalidatePath("/admin/users")

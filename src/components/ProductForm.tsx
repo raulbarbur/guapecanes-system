@@ -3,9 +3,15 @@
 
 import { useState } from "react"
 import { createProduct, updateProduct } from "@/actions/product-actions"
-import ImageUpload from "./ImageUpload"
+import dynamic from 'next/dynamic'
 import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
+import { useToast } from "@/components/ui/Toast"
+
+const ImageUpload = dynamic(() => import('./ImageUpload'), {
+  loading: () => <p className="text-xs text-muted-foreground animate-pulse">Cargando módulo de imágenes...</p>,
+  ssr: false
+})
 
 type VariantItem = {
   id?: string 
@@ -31,6 +37,7 @@ type Props = {
 
 export default function ProductForm({ owners, categories, initialData }: Props) {
   const router = useRouter()
+  const { addToast } = useToast()
   const [imageUrl, setImageUrl] = useState(initialData?.imageUrl || "")
   const [loading, setLoading] = useState(false)
   const [isNewCategory, setIsNewCategory] = useState(false)
@@ -38,14 +45,20 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
     initialData?.variants || [{ name: "Estándar", costPrice: 0, salePrice: 0 }]
   )
 
+  const showImages = process.env.NEXT_PUBLIC_ENABLE_IMAGES === 'true'
+
   const addVariant = () => {
     setVariants([...variants, { name: "", costPrice: 0, salePrice: 0 }])
   }
 
   const removeVariant = (index: number) => {
-    if (variants.length <= 1) return alert("Debe haber al menos una variante.")
+    if (variants.length <= 1) {
+        addToast("Debe haber al menos una variante.", "error")
+        return
+    }
     if (variants[index].id) {
-       alert("⚠️ Las variantes guardadas no se borran desde aquí para proteger el historial.")
+        addToast("Las variantes guardadas no se borran desde aquí para proteger el historial.", "info")
+        return
     }
     const newList = [...variants]
     newList.splice(index, 1)
@@ -59,27 +72,42 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
   }
 
   const handleSubmit = async (formData: FormData) => {
-    if (variants.some(v => !v.name.trim())) return alert("Todas las variantes deben tener nombre.")
-    if (variants.some(v => v.salePrice < v.costPrice)) return alert("Revisá los precios: Rentabilidad negativa.")
+    if (variants.some(v => !v.name.trim())) {
+        addToast("Todas las variantes deben tener un nombre.", "error")
+        return
+    }
+    if (variants.some(v => v.salePrice < v.costPrice)) {
+        addToast("Revisá los precios: Hay rentabilidad negativa.", "error")
+        return
+    }
 
     setLoading(true)
     if (imageUrl) formData.append("imageUrl", imageUrl)
     if (isNewCategory) formData.append("isNewCategory", "true")
     formData.append("variantsJson", JSON.stringify(variants))
 
-    let result;
     if (initialData) {
         formData.append("id", initialData.id)
-        result = await updateProduct(formData)
-        if (result?.success) {
+        const result = await updateProduct(formData)
+        
+        if (result && 'error' in result) {
+            // Corrección Final: Añadir fallback por si result.error es undefined o null
+            addToast(result.error || "Error al actualizar el producto.", "error")
+        } else {
+            addToast("Producto actualizado con éxito.", "success")
             router.push("/products")
             router.refresh()
-        } else {
-            alert("❌ Error: " + result?.error)
         }
     } else {
-        result = await createProduct(formData)
-        if (result?.error) alert("❌ Error: " + result.error)
+        const result = await createProduct(formData)
+
+        if (result && 'error' in result) {
+            // Corrección Final: Añadir fallback por si result.error es undefined o null
+            addToast(result.error || "Error al crear el producto.", "error")
+        } else {
+            addToast("Producto creado con éxito.", "success")
+            router.refresh()
+        }
     }
     setLoading(false)
   }
@@ -95,98 +123,29 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
       
       <form action={handleSubmit} className="space-y-8">
         
-        {/* === DATOS GENERALES === */}
         <div className="grid grid-cols-1 gap-6">
             <div className="space-y-4">
-                <div>
-                    <label className={labelClass}>Nombre del Producto *</label>
-                    <input 
-                        name="name" 
-                        defaultValue={initialData?.name} 
-                        type="text" 
-                        required 
-                        placeholder="Ej: Collar de Cuero"
-                        className={inputClass} 
-                    />
-                </div>
-                <div>
-                    <label className={labelClass}>Descripción</label>
-                    <textarea 
-                        name="description" 
-                        defaultValue={initialData?.description || ""} 
-                        className={inputClass} 
-                        rows={2} 
-                    />
-                </div>
+                <div><label className={labelClass}>Nombre del Producto *</label><input name="name" defaultValue={initialData?.name} type="text" required placeholder="Ej: Collar de Cuero" className={inputClass} /></div>
+                <div><label className={labelClass}>Descripción</label><textarea name="description" defaultValue={initialData?.description || ""} className={inputClass} rows={2} /></div>
             </div>
-
             <div className="grid grid-cols-2 gap-4">
                  <div>
                     <label className={labelClass}>Dueño *</label>
-                    <select 
-                        name="ownerId" 
-                        defaultValue={initialData?.ownerId || ""} 
-                        required 
-                        className={inputClass}
-                    >
+                    <select name="ownerId" defaultValue={initialData?.ownerId || ""} required className={inputClass}>
                         <option value="">Seleccionar...</option>
-                        {owners.map(o => (
-                            <option key={o.id} value={o.id}>{o.name}</option>
-                        ))}
+                        {owners.map(o => (<option key={o.id} value={o.id}>{o.name}</option>))}
                     </select>
                 </div>
-
                 <div>
-                    <div className="flex justify-between items-center mb-1">
-                        <label className={labelClass}>Categoría *</label>
-                        <button 
-                            type="button"
-                            onClick={() => setIsNewCategory(!isNewCategory)}
-                            className="text-[10px] text-primary font-bold hover:underline uppercase"
-                        >
-                            {isNewCategory ? "Cancelar" : "+ Nueva"}
-                        </button>
-                    </div>
-                    {isNewCategory ? (
-                        <input 
-                            name="categoryName"
-                            type="text"
-                            placeholder="Nombre nueva categoría..."
-                            className={cn(inputClass, "bg-primary/5 border-primary/20")}
-                            autoFocus
-                        />
-                    ) : (
-                        <select 
-                            name="categoryId" 
-                            defaultValue={initialData?.categoryId || ""} 
-                            required 
-                            className={inputClass}
-                        >
-                            <option value="">Seleccionar...</option>
-                            {categories.map(c => (
-                                <option key={c.id} value={c.id}>{c.name}</option>
-                            ))}
-                        </select>
-                    )}
+                    <div className="flex justify-between items-center mb-1"><label className={labelClass}>Categoría *</label><button type="button" onClick={() => setIsNewCategory(!isNewCategory)} className="text-[10px] text-primary font-bold hover:underline uppercase">{isNewCategory ? "Cancelar" : "+ Nueva"}</button></div>
+                    {isNewCategory ? (<input name="categoryName" type="text" placeholder="Nombre nueva categoría..." className={cn(inputClass, "bg-primary/5 border-primary/20")} autoFocus />) : (<select name="categoryId" defaultValue={initialData?.categoryId || ""} required className={inputClass}><option value="">Seleccionar...</option>{categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}</select>)}
                 </div>
             </div>
         </div>
 
-        {/* === VARIANTES === */}
         <div className="bg-muted/30 p-4 rounded-xl border border-border">
-            <div className="flex justify-between items-center mb-4">
-                <label className="text-sm font-bold text-foreground">Variantes y Precios</label>
-                <button 
-                    type="button" 
-                    onClick={addVariant}
-                    className="text-xs bg-foreground text-background px-3 py-1.5 rounded-lg hover:opacity-90 font-bold transition"
-                >
-                    + Agregar Variante
-                </button>
-            </div>
-            
+            <div className="flex justify-between items-center mb-4"><label className="text-sm font-bold text-foreground">Variantes y Precios</label><button type="button" onClick={addVariant} className="text-xs bg-foreground text-background px-3 py-1.5 rounded-lg hover:opacity-90 font-bold transition">+ Agregar Variante</button></div>
             <div className="space-y-2">
-                {/* HEADERS (Solo desktop) */}
                 <div className="hidden md:grid grid-cols-12 gap-2 text-[10px] uppercase font-bold text-muted-foreground px-2">
                     <div className="col-span-4">Nombre</div>
                     <div className="col-span-3">Costo</div>
@@ -194,73 +153,24 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
                     <div className="col-span-1 text-center">Stock</div>
                     <div className="col-span-1"></div>
                 </div>
-
                 {variants.map((variant, idx) => (
                     <div key={idx} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center bg-card p-2 md:p-0 rounded-lg md:bg-transparent border md:border-0 border-border mb-2 md:mb-0">
-                        <div className="col-span-4">
-                            <input 
-                                type="text" 
-                                value={variant.name}
-                                onChange={(e) => updateVariant(idx, 'name', e.target.value)}
-                                placeholder="Ej: XL, Rojo..."
-                                className={inputClass}
-                            />
-                        </div>
-                        <div className="col-span-3 flex items-center gap-1">
-                            <span className="text-xs text-muted-foreground md:hidden">Costo:</span>
-                            <input 
-                                type="number" step="0.01"
-                                value={variant.costPrice}
-                                onChange={(e) => updateVariant(idx, 'costPrice', parseFloat(e.target.value) || 0)}
-                                className={inputClass}
-                            />
-                        </div>
-                        <div className="col-span-3 flex items-center gap-1">
-                            <span className="text-xs text-muted-foreground md:hidden">Venta:</span>
-                            <input 
-                                type="number" step="0.01"
-                                value={variant.salePrice}
-                                onChange={(e) => updateVariant(idx, 'salePrice', parseFloat(e.target.value) || 0)}
-                                className={cn(inputClass, "font-bold text-green-600 dark:text-green-400")}
-                            />
-                        </div>
-                        <div className="col-span-1 text-center text-xs font-mono text-muted-foreground hidden md:block">
-                            {variant.id ? variant.stock : '-'}
-                        </div>
-                        <div className="col-span-1 text-right md:text-center">
-                            <button 
-                                type="button" 
-                                onClick={() => removeVariant(idx)}
-                                className="text-muted-foreground hover:text-destructive transition p-2"
-                            >
-                                ✕
-                            </button>
-                        </div>
+                        <div className="col-span-4"><input type="text" value={variant.name} onChange={(e) => updateVariant(idx, 'name', e.target.value)} placeholder="Ej: XL, Rojo..." className={inputClass} /></div>
+                        <div className="col-span-3 flex items-center gap-1"><span className="text-xs text-muted-foreground md:hidden">Costo:</span><input type="number" step="0.01" value={variant.costPrice} onChange={(e) => updateVariant(idx, 'costPrice', parseFloat(e.target.value) || 0)} className={inputClass} /></div>
+                        <div className="col-span-3 flex items-center gap-1"><span className="text-xs text-muted-foreground md:hidden">Venta:</span><input type="number" step="0.01" value={variant.salePrice} onChange={(e) => updateVariant(idx, 'salePrice', parseFloat(e.target.value) || 0)} className={cn(inputClass, "font-bold text-green-600 dark:text-green-400")} /></div>
+                        <div className="col-span-1 text-center text-xs font-mono text-muted-foreground hidden md:block">{variant.id ? variant.stock : '-'}</div>
+                        <div className="col-span-1 text-right md:text-center"><button type="button" onClick={() => removeVariant(idx)} className="text-muted-foreground hover:text-destructive transition p-2">✕</button></div>
                     </div>
                 ))}
             </div>
         </div>
 
-        {/* === FOOTER === */}
         <div className="flex flex-col md:flex-row items-center gap-6 pt-4 border-t border-border">
-            <div className="w-full md:w-1/2">
-                <ImageUpload onImageUpload={(url) => setImageUrl(url)} />
-            </div>
-            
-            <button 
-                type="submit" 
-                disabled={loading}
-                className={cn(
-                    "w-full md:w-auto md:ml-auto px-8 py-3 rounded-xl font-bold text-white shadow-lg transition active:scale-95",
-                    loading 
-                        ? 'bg-muted text-muted-foreground cursor-wait' 
-                        : 'bg-green-600 hover:bg-green-700'
-                )}
-            >
+            {showImages && (<div className="w-full md:w-1/2"><ImageUpload onImageUpload={(url) => setImageUrl(url)} /></div>)}
+            <button type="submit" disabled={loading} className={cn("w-full md:w-auto md:ml-auto px-8 py-3 rounded-xl font-bold text-white shadow-lg transition active:scale-95", loading ? 'bg-muted text-muted-foreground cursor-wait' : 'bg-green-600 hover:bg-green-700')}>
                 {loading ? "Guardando..." : "GUARDAR PRODUCTO"}
             </button>
         </div>
-
       </form>
     </div>
   )
