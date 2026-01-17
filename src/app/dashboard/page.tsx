@@ -1,3 +1,4 @@
+// src/app/dashboard/page.tsx
 import { prisma } from "@/lib/prisma"
 import Link from "next/link"
 import { getLocalDateISO } from "@/lib/utils"
@@ -8,11 +9,13 @@ export default async function DashboardPage() {
   const startOfToday = new Date(`${todayStr}T00:00:00`)
   const endOfToday = new Date(`${todayStr}T23:59:59`)
 
+  // R-02: Consultar por 'paidAt' en lugar de 'createdAt'
+  // Esto incluye ventas de hoy + deudas viejas pagadas hoy.
   const [todaySales, todayAppointments, lowStockVariants] = await Promise.all([
     prisma.sale.findMany({
       where: {
         status: "COMPLETED",
-        createdAt: { gte: startOfToday, lte: endOfToday }
+        paidAt: { gte: startOfToday, lte: endOfToday } 
       }
     }),
     prisma.appointment.findMany({
@@ -60,10 +63,10 @@ export default async function DashboardPage() {
       {/* KPI GRID */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         
-        {/* Total Card - Mantenemos estilo oscuro distintivo pero usando variables compatibles */}
+        {/* Total Card - Caja Real de HOY */}
         <div className="bg-slate-900 dark:bg-card dark:border dark:border-border text-white p-8 rounded-3xl shadow-xl relative overflow-hidden group">
             <div className="absolute top-0 right-0 w-32 h-32 bg-primary rounded-full blur-[60px] opacity-40 group-hover:opacity-60 transition"></div>
-            <p className="text-slate-400 font-bold uppercase tracking-widest text-xs mb-2">Ventas Netas</p>
+            <p className="text-slate-400 font-bold uppercase tracking-widest text-xs mb-2">Caja Diaria (Real)</p>
             <p className="text-5xl font-black font-nunito">${stats.total.toLocaleString()}</p>
             <div className="mt-6 flex gap-6">
                 <div>

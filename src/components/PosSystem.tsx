@@ -3,20 +3,42 @@
 
 import Image from "next/image"
 import TicketView from "./TicketView"
-import { usePos, ProductGroupType } from "@/hooks/usePos" // 👈 Importamos el Hook
+import { usePos, ProductGroupType, CustomerOption } from "@/hooks/usePos"
 import { cn } from "@/lib/utils"
 
-export default function PosSystem({ products }: { products: ProductGroupType[] }) {
-  // 1. INVOCAMOS EL HOOK (Cerebro separado de la UI)
+export default function PosSystem({ products, customers }: { products: ProductGroupType[], customers: CustomerOption[] }) {
   const {
     cart, total, loading, paymentMethod, lastSale,
-    search, selectedCategory, categories, filteredProducts, selectedProductForModal,
-    setPaymentMethod, setSearch, setSelectedCategory, setSelectedProductForModal, clearLastSale,
+    search, selectedCategory, categories, filteredProducts, selectedProductForModal, selectedCustomerId,
+    setPaymentMethod, setSearch, setSelectedCategory, setSelectedProductForModal, clearLastSale, setSelectedCustomerId,
     handleProductClick, addVariantToCart, removeFromCart, updateServicePrice, checkout
-  } = usePos(products)
+  } = usePos(products, customers)
 
-  // 2. RENDERIZADO CONDICIONAL: TICKET DE ÉXITO
+  // NUEVO: RENDERIZADO CONDICIONAL POR MÉTODO
   if (lastSale) {
+    if (lastSale.method === 'CHECKING_ACCOUNT') {
+        // Vista simplificada para Fiado (Sin Ticket Fiscal)
+        return (
+            <div className="flex flex-col items-center justify-center h-full p-4 animate-in zoom-in-95 duration-300">
+                <div className="bg-card p-10 rounded-3xl shadow-xl border border-border text-center max-w-md w-full">
+                    <span className="text-6xl mb-4 block">📓</span>
+                    <h2 className="text-3xl font-black text-foreground mb-2">Cuenta Corriente Actualizada</h2>
+                    <p className="text-muted-foreground font-medium mb-6">
+                        Se registraron los ítems en la cuenta del cliente correctamente.
+                    </p>
+                    
+                    <button 
+                        onClick={clearLastSale}
+                        className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-bold py-4 rounded-xl shadow-lg transition active:scale-95"
+                    >
+                        ✨ Nueva Venta
+                    </button>
+                </div>
+            </div>
+        )
+    }
+
+    // Vista normal (Ticket) para Cash/Transfer
     return (
         <TicketView 
             mode="POS"
@@ -30,15 +52,14 @@ export default function PosSystem({ products }: { products: ProductGroupType[] }
     )
   }
 
-  // 3. UI PRINCIPAL
+  // ... (El resto del componente sigue IGUAL, copio solo el inicio para contexto)
   return (
     <>
     <div className="flex flex-col md:flex-row h-[calc(100vh-80px)] md:h-[calc(100vh-20px)] gap-6 pb-4 md:pb-0">
       
       {/* === COLUMNA 1: CATÁLOGO === */}
       <div className="flex-1 flex flex-col gap-6 overflow-hidden h-full">
-        
-        {/* Header de Filtros */}
+        {/* Header Filtros */}
         <div className="bg-card p-4 rounded-3xl shadow-sm border border-border space-y-3 shrink-0">
             <div className="relative">
                 <input 
@@ -94,7 +115,6 @@ export default function PosSystem({ products }: { products: ProductGroupType[] }
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 pb-20">
                     {filteredProducts.map(p => {
                         const isOOS = p.totalStock === 0
-                        // Badges con opacidad para dark mode
                         const stockColor = isOOS 
                             ? 'bg-zinc-500' 
                             : p.totalStock <= 3 ? 'bg-orange-500' : 'bg-green-500'
@@ -111,7 +131,6 @@ export default function PosSystem({ products }: { products: ProductGroupType[] }
                                     : "bg-card border-border hover:border-primary hover:shadow-lg hover:shadow-primary/10 hover:-translate-y-1"
                             )}
                         >
-                            {/* IMAGEN */}
                             <div className="w-full aspect-square bg-muted rounded-xl overflow-hidden relative mb-3">
                                 {p.imageUrl ? (
                                     <Image 
@@ -134,7 +153,6 @@ export default function PosSystem({ products }: { products: ProductGroupType[] }
                                 </div>
                             </div>
                             
-                            {/* INFO */}
                             <div className="flex-1 min-w-0">
                                 <h3 className="font-bold text-foreground text-sm leading-tight line-clamp-2 mb-1 group-hover:text-primary transition-colors">
                                     {p.name}
@@ -144,7 +162,6 @@ export default function PosSystem({ products }: { products: ProductGroupType[] }
                                 </p>
                             </div>
                             
-                            {/* PRECIO */}
                             <div className="mt-3 pt-2 border-t border-dashed border-border flex justify-between items-center w-full">
                                 {p.variants.length > 1 ? (
                                     <span className="text-[10px] font-bold bg-secondary text-secondary-foreground px-2 py-1 rounded-full">
@@ -167,17 +184,33 @@ export default function PosSystem({ products }: { products: ProductGroupType[] }
       <div className="w-full md:w-[380px] shrink-0 h-full flex flex-col">
         <div className="bg-card border border-border rounded-3xl shadow-xl flex flex-col h-full overflow-hidden relative">
           
-          {/* Header Ticket */}
-          <div className="p-5 border-b border-border bg-muted/30 backdrop-blur-sm flex justify-between items-center">
-            <h2 className="font-black text-lg text-foreground font-nunito flex items-center gap-2">
-                🛍️ Ticket
-            </h2>
-            <span className="text-xs font-bold bg-background text-muted-foreground border border-border px-2 py-1 rounded-lg">
-                {cart.length} items
-            </span>
+          <div className="p-5 border-b border-border bg-muted/30 backdrop-blur-sm space-y-3">
+            <div className="flex justify-between items-center">
+                <h2 className="font-black text-lg text-foreground font-nunito flex items-center gap-2">
+                    🛍️ Ticket
+                </h2>
+                <span className="text-xs font-bold bg-background text-muted-foreground border border-border px-2 py-1 rounded-lg">
+                    {cart.length} items
+                </span>
+            </div>
+            
+            <select 
+                value={selectedCustomerId}
+                onChange={(e) => setSelectedCustomerId(e.target.value)}
+                className={cn(
+                    "w-full p-2.5 rounded-xl text-sm font-bold border transition outline-none cursor-pointer appearance-none",
+                    selectedCustomerId 
+                        ? "bg-primary/10 border-primary text-primary" 
+                        : "bg-background border-input text-muted-foreground"
+                )}
+            >
+                <option value="">👤 Cliente Final (Anónimo)</option>
+                {customers.map(c => (
+                    <option key={c.id} value={c.id}>👤 {c.name}</option>
+                ))}
+            </select>
           </div>
           
-          {/* Items del Carrito */}
           <div className="p-4 space-y-3 flex-1 overflow-y-auto custom-scrollbar">
             {cart.length === 0 && (
               <div className="h-full flex flex-col items-center justify-center text-center opacity-40 p-8">
@@ -230,30 +263,41 @@ export default function PosSystem({ products }: { products: ProductGroupType[] }
             ))}
           </div>
 
-          {/* Footer Pago */}
           <div className="p-5 bg-card border-t border-border z-10">
-             <div className="grid grid-cols-2 gap-3 mb-5">
+             
+             <div className="grid grid-cols-3 gap-2 mb-5">
                 <button 
                     onClick={() => setPaymentMethod("CASH")}
                     className={cn(
-                        "p-3 rounded-xl text-xs font-black border transition flex items-center justify-center gap-2",
+                        "p-2 rounded-xl text-[10px] font-black border transition flex flex-col items-center justify-center gap-1 h-14",
                         paymentMethod === "CASH" 
                             ? "bg-green-500/20 text-green-700 dark:text-green-400 border-green-500/50" 
                             : "bg-background border-border text-muted-foreground hover:bg-secondary"
                     )}
                 >
-                    💵 EFECTIVO
+                    <span>💵</span> EFECTIVO
                 </button>
                 <button 
                     onClick={() => setPaymentMethod("TRANSFER")}
                     className={cn(
-                        "p-3 rounded-xl text-xs font-black border transition flex items-center justify-center gap-2",
+                        "p-2 rounded-xl text-[10px] font-black border transition flex flex-col items-center justify-center gap-1 h-14",
                         paymentMethod === "TRANSFER" 
                             ? "bg-blue-500/20 text-blue-700 dark:text-blue-400 border-blue-500/50" 
                             : "bg-background border-border text-muted-foreground hover:bg-secondary"
                     )}
                 >
-                    🏦 TRANSFER
+                    <span>🏦</span> TRANSFER
+                </button>
+                <button 
+                    onClick={() => setPaymentMethod("CHECKING_ACCOUNT")}
+                    className={cn(
+                        "p-2 rounded-xl text-[10px] font-black border transition flex flex-col items-center justify-center gap-1 h-14",
+                        paymentMethod === "CHECKING_ACCOUNT" 
+                            ? "bg-purple-500/20 text-purple-700 dark:text-purple-400 border-purple-500/50" 
+                            : "bg-background border-border text-muted-foreground hover:bg-secondary"
+                    )}
+                >
+                    <span>📓</span> FIADO
                 </button>
              </div>
 
@@ -288,9 +332,6 @@ export default function PosSystem({ products }: { products: ProductGroupType[] }
       </div>
     </div>
 
-    {/* ==============================================
-        MODAL SELECCIÓN VARIANTE
-       ============================================== */}
     {selectedProductForModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
             <div className="bg-card rounded-3xl shadow-2xl w-full max-w-md overflow-hidden border border-border">

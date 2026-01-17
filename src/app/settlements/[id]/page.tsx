@@ -10,16 +10,26 @@ interface Props {
 export default async function SettlementDetailPage({ params }: Props) {
   const { id } = await params
 
-  // Buscamos la liquidación con TODO el detalle
+  // Buscamos la liquidación con la nueva estructura de tablas intermedias
   const settlement = await prisma.settlement.findUnique({
     where: { id },
     include: {
       owner: true,
       items: {
-        // ⚠️ CORRECCIÓN 1: Ordenamos por la fecha de la VENTA padre, no del item
-        orderBy: { sale: { createdAt: 'desc' } },
-        // ⚠️ CORRECCIÓN 2: Incluimos la venta para leer esa fecha
-        include: { sale: true }
+        // CORRECCIÓN: Ordenamos navegando la relación (Line -> Item -> Sale)
+        orderBy: {
+            saleItem: {
+                sale: { createdAt: 'desc' }
+            }
+        },
+        // En el nuevo esquema, 'items' son líneas de liquidación (SettlementLine)
+        include: {
+          saleItem: {
+            include: {
+              sale: true // Necesitamos la fecha de la venta original
+            }
+          }
+        }
       },
       adjustments: {
         orderBy: { createdAt: 'desc' }
@@ -29,18 +39,26 @@ export default async function SettlementDetailPage({ params }: Props) {
 
   if (!settlement) return notFound()
 
-  // Mapeo de datos para el componente visual
+  // Mapeamos los datos al formato que espera el componente visual (SettlementTicket)
   const formattedData = {
-    ...settlement,
+    id: settlement.id,
+    createdAt: settlement.createdAt,
     totalAmount: Number(settlement.totalAmount),
-    items: settlement.items.map(i => ({
-        id: i.id,
-        description: i.description,
-        quantity: i.quantity,
-        costAtSale: Number(i.costAtSale),
-        // ⚠️ CORRECCIÓN 3: Extraemos la fecha desde la relación 'sale'
-        createdAt: i.sale.createdAt 
-    })),
+    owner: settlement.owner,
+    
+    // Transformamos las líneas de liquidación
+    items: settlement.items.map(line => ({
+        id: line.id,
+        // La descripción vive en el item de venta original
+        description: line.saleItem.description,
+        // La cantidad es la de ESTA liquidación (puede ser parcial)
+        quantity: line.quantity,
+        // El costo unitario histórico
+        costAtSale: Number(line.saleItem.costAtSale),
+        // La fecha de la venta original
+        createdAt: line.saleItem.sale.createdAt 
+    })), // El sort ya lo hicimos en DB, pero no está de más mantener el orden del array
+
     adjustments: settlement.adjustments.map(a => ({
         ...a,
         amount: Number(a.amount)

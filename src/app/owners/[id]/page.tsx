@@ -16,7 +16,20 @@ export default async function OwnerProfilePage({ params }: Props) {
     include: {
       products: {
         where: { isActive: true },
-        include: { variants: true }
+        include: { 
+            variants: {
+                include: {
+                    saleItems: {
+                        where: { 
+                            sale: { 
+                                status: 'COMPLETED',
+                                paymentStatus: 'PAID' // 👈 FILTRO
+                            } 
+                        }
+                    }
+                }
+            } 
+        }
       },
       settlements: {
         orderBy: { createdAt: 'desc' },
@@ -38,14 +51,19 @@ export default async function OwnerProfilePage({ params }: Props) {
     }))
   )
 
-  const pendingItems = await prisma.saleItem.findMany({
-    where: {
-      isSettled: false,
-      variant: { product: { ownerId: id } }
-    }
+  let debtFromSales = 0
+  
+  owner.products.forEach(p => {
+      p.variants.forEach(v => {
+          v.saleItems.forEach(item => {
+              const pendingQty = item.quantity - item.settledQuantity
+              if (pendingQty > 0) {
+                  debtFromSales += (Number(item.costAtSale) * pendingQty)
+              }
+          })
+      })
   })
 
-  const debtFromSales = pendingItems.reduce((sum, item) => sum + (Number(item.costAtSale) * item.quantity), 0)
   const debtFromAdj = owner.balanceAdjustments.reduce((sum, adj) => sum + Number(adj.amount), 0)
   const totalDebt = debtFromSales + debtFromAdj
 
@@ -118,7 +136,7 @@ export default async function OwnerProfilePage({ params }: Props) {
                         <div key={idx} className="p-4 flex justify-between items-center hover:bg-muted/30 transition">
                             <div className="flex items-center gap-3">
                                 {item.image ? (
-                                    <img src={item.image} className="w-10 h-10 rounded-lg object-cover border border-border" />
+                                    <img src={item.image} className="w-10 h-10 rounded-lg object-cover border border-border" alt={item.name} />
                                 ) : (
                                     <div className="w-10 h-10 bg-secondary rounded-lg flex items-center justify-center text-[8px] font-bold text-muted-foreground border border-border">FOTO</div>
                                 )}

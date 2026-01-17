@@ -24,6 +24,12 @@ export type ProductGroupType = {
   variants: VariantType[]
 }
 
+// NUEVO TIPO PARA CLIENTES
+export type CustomerOption = {
+  id: string
+  name: string
+}
+
 export type CartItem = {
   type: 'PRODUCT' | 'SERVICE'
   id: string
@@ -33,7 +39,7 @@ export type CartItem = {
   stockMax?: number
 }
 
-type PaymentMethod = "CASH" | "TRANSFER"
+type PaymentMethod = "CASH" | "TRANSFER" | "CHECKING_ACCOUNT" // 👈 Agregamos Cta Cte
 
 type SaleResult = {
     id: string
@@ -43,7 +49,7 @@ type SaleResult = {
     method: PaymentMethod
 }
 
-export function usePos(products: ProductGroupType[]) {
+export function usePos(products: ProductGroupType[], customers: CustomerOption[]) {
   const { addToast } = useToast()
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -54,27 +60,25 @@ export function usePos(products: ProductGroupType[]) {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH")
   const [lastSale, setLastSale] = useState<SaleResult | null>(null)
   
+  // NUEVO ESTADO: CLIENTE SELECCIONADO
+  const [selectedCustomerId, setSelectedCustomerId] = useState<string>("")
+
   // Filtros
   const [search, setSearch] = useState("")
   const [selectedCategory, setSelectedCategory] = useState<string | "ALL">("ALL")
 
-  // Modal de Selección
+  // Modal
   const [selectedProductForModal, setSelectedProductForModal] = useState<ProductGroupType | null>(null)
 
-  // --- EFECTOS ---
-  
-  // Carga de servicios desde la URL (Agenda)
+  // --- EFECTOS (Carga de Servicios desde Agenda) ---
   useEffect(() => {
     const apptId = searchParams.get("apptId")
     const petName = searchParams.get("petName")
     
-    // Solo cargamos si hay datos y el carrito está vacío para evitar duplicados infinitos
     if (apptId && petName) {
-       // Verificamos si ya está en el carrito
        setCart(current => {
          const exists = current.some(i => i.id === apptId && i.type === 'SERVICE')
          if (exists) return current
-
          addToast(`Servicio para ${petName} cargado`, 'info')
          return [{
             type: 'SERVICE',
@@ -106,7 +110,6 @@ export function usePos(products: ProductGroupType[]) {
   }, [products, search, selectedCategory])
 
   // --- LÓGICA CARRITO ---
-
   const addVariantToCart = useCallback((productName: string, variant: VariantType) => {
     if (variant.stock <= 0) {
         addToast(`Sin stock para ${variant.name}`, 'error')
@@ -122,7 +125,6 @@ export function usePos(products: ProductGroupType[]) {
                 addToast("Stock máximo alcanzado", 'error')
                 return current
             }
-            
             const newCart = [...current]
             newCart[existingIndex] = { ...existingItem, quantity: existingItem.quantity + 1 }
             return newCart
@@ -143,12 +145,10 @@ export function usePos(products: ProductGroupType[]) {
 
   const handleProductClick = useCallback((product: ProductGroupType) => {
     const activeVariants = product.variants.filter(v => v.stock > 0)
-
     if (activeVariants.length === 0) {
         addToast("Producto agotado", 'error')
         return
     }
-
     if (activeVariants.length === 1) {
         addVariantToCart(product.name, activeVariants[0])
     } else {
@@ -171,6 +171,12 @@ export function usePos(products: ProductGroupType[]) {
   const checkout = async () => {
     if (total === 0 && !confirm("¿Confirmar venta por $0?")) return
     
+    // VALIDACIÓN NUEVA: Si es Fiado, debe haber cliente
+    if (paymentMethod === 'CHECKING_ACCOUNT' && !selectedCustomerId) {
+        addToast("⚠️ Seleccioná un cliente para fiar.", 'error')
+        return
+    }
+
     setLoading(true)
     
     const payload = cart.map(item => ({ 
@@ -181,7 +187,8 @@ export function usePos(products: ProductGroupType[]) {
         quantity: item.quantity 
     }))
     
-    const result = await processSale(payload, total, paymentMethod)
+    // Pasamos el selectedCustomerId (puede ser string vacío si no se eligió, que es válido para CASH)
+    const result = await processSale(payload, total, paymentMethod, selectedCustomerId || undefined)
     
     setLoading(false)
 
@@ -195,8 +202,9 @@ export function usePos(products: ProductGroupType[]) {
         method: paymentMethod
       })
       setCart([]) 
-      
-      // Si veníamos de la agenda, limpiamos la URL para no volver a cargar el servicio
+      setSelectedCustomerId("") // Reset cliente
+      setPaymentMethod("CASH") // Reset método
+
       if (searchParams.get("apptId")) {
           router.replace("/pos") 
       } else {
@@ -210,30 +218,16 @@ export function usePos(products: ProductGroupType[]) {
   const clearLastSale = () => setLastSale(null)
 
   return {
-    // Estado
-    cart,
-    total,
-    loading,
-    paymentMethod,
-    lastSale,
-    search,
-    selectedCategory,
-    categories,
-    filteredProducts,
-    selectedProductForModal,
+    cart, total, loading, paymentMethod, lastSale,
+    search, selectedCategory, categories, filteredProducts, selectedProductForModal,
     
-    // Setters
-    setPaymentMethod,
-    setSearch,
-    setSelectedCategory,
-    setSelectedProductForModal,
-    clearLastSale,
+    // NUEVO RETURN
+    selectedCustomerId,
+    
+    setPaymentMethod, setSearch, setSelectedCategory, setSelectedProductForModal, clearLastSale,
+    // NUEVO SETTER
+    setSelectedCustomerId,
 
-    // Acciones
-    handleProductClick,
-    addVariantToCart,
-    removeFromCart,
-    updateServicePrice,
-    checkout
+    handleProductClick, addVariantToCart, removeFromCart, updateServicePrice, checkout
   }
 }
