@@ -21,21 +21,28 @@ enum Role {
 
 // Tipos de movimiento de stock para auditoría estricta
 enum StockMovementType {
-  ENTRY            // Ingreso de mercadería (Suma)
-  SALE             // Venta por caja (Resta)
-  ADJUSTMENT       // Ajuste manual por rotura/pérdida (Resta o Suma)
+  ENTRY // Ingreso de mercadería (Suma)
+  SALE // Venta por caja (Resta)
+  ADJUSTMENT // Ajuste manual por rotura/pérdida (Resta o Suma)
   OWNER_WITHDRAWAL // Retiro del dueño (Resta sin venta)
-  RETURN           // Devolución de cliente (Suma)
-  SALE_CANCELLED   // Anulación de venta (Suma automática)
+  RETURN // Devolución de cliente (Suma)
+  SALE_CANCELLED // Anulación de venta (Suma automática)
 }
 
 // Estados del turno de peluquería
 enum ApptStatus {
-  PENDING   // Recién creado
+  PENDING // Recién creado
   CONFIRMED // Cliente llegó / Confirmado
   COMPLETED // Servicio terminado
-  BILLED    // Ya se cobró en caja
+  BILLED // Ya se cobró en caja
   CANCELLED // Turno cancelado
+}
+
+// NUEVO: Estado de pago de la venta (Caja)
+enum PaymentStatus {
+  PAID // Pagado totalmente en el momento (Efectivo/Transferencia)
+  PENDING // Cuenta Corriente / Fiado (Genera deuda al cliente)
+  PARTIAL // (Reservado para futuro: pago parcial de cliente)
 }
 
 // ==============================
@@ -45,7 +52,7 @@ enum ApptStatus {
 model User {
   id        String   @id @default(uuid())
   email     String   @unique
-  password  String   // Hashed
+  password  String // Hashed
   name      String
   role      Role     @default(STAFF)
   createdAt DateTime @default(now())
@@ -57,44 +64,57 @@ model User {
 
 // 1. Dueños de Mercadería (Consignación)
 model Owner {
-  id                 String    @id @default(uuid())
-  name               String
-  phone              String?
-  email              String?
-  isActive           Boolean   @default(true) 
-  createdAt          DateTime  @default(now())
-  
+  id        String   @id @default(uuid())
+  name      String
+  phone     String?
+  email     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
   // Relaciones
   products           Product[]
   settlements        Settlement[]
-  balanceAdjustments BalanceAdjustment[] 
+  balanceAdjustments BalanceAdjustment[]
 
-  // Índices para búsqueda rápida
+  @@index([name])
+}
+
+// NUEVO: Clientes (Compradores / Cuentas Corrientes)
+model Customer {
+  id        String   @id @default(uuid())
+  name      String
+  phone     String?
+  email     String?
+  address   String?
+  createdAt DateTime @default(now())
+
+  sales Sale[] // Historial de compras (pagas y impagas)
+
   @@index([name])
 }
 
 // 2. Categorías de Productos
 model Category {
   id       String    @id @default(uuid())
-  name     String    @unique 
+  name     String    @unique
   products Product[]
 }
 
 // 3. Productos (Cabecera)
 model Product {
-  id          String    @id @default(uuid())
+  id          String  @id @default(uuid())
   name        String
   description String?
-  
+
   // Relaciones
-  ownerId     String
-  owner       Owner     @relation(fields: [ownerId], references: [id])
-  categoryId  String
-  category    Category  @relation(fields: [categoryId], references: [id])
-  
-  variants    ProductVariant[]
-  
-  isActive    Boolean   @default(true)
+  ownerId    String
+  owner      Owner    @relation(fields: [ownerId], references: [id])
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  variants ProductVariant[]
+
+  isActive Boolean @default(true)
 
   @@index([name])
   @@index([ownerId])
@@ -102,35 +122,35 @@ model Product {
 
 // 4. Variantes (Talle/Color/Precio) - Es lo que realmente se vende
 model ProductVariant {
-  id        String   @id @default(uuid())
+  id        String  @id @default(uuid())
   productId String
-  product   Product  @relation(fields: [productId], references: [id])
-  name      String   // Ej: "Rojo - XL" o "Estándar"
-  imageUrl  String?  // URL externa (Cloudinary)
-  
+  product   Product @relation(fields: [productId], references: [id])
+  name      String // Ej: "Rojo - XL" o "Estándar"
+  imageUrl  String? // URL externa (Cloudinary)
+
   // PRECIOS: Usamos Decimal para exactitud monetaria
-  costPrice Decimal  @db.Decimal(10, 2) 
-  salePrice Decimal  @db.Decimal(10, 2)
-  stock     Int      @default(0)
-  
+  costPrice Decimal @db.Decimal(10, 2)
+  salePrice Decimal @db.Decimal(10, 2)
+  stock     Int     @default(0)
+
   // Relaciones
   stockMovements StockMovement[]
   saleItems      SaleItem[]
 
   // Evitar duplicados del mismo nombre dentro del mismo producto
-  @@unique([productId, name]) 
+  @@unique([productId, name])
 }
 
 // 5. Historial de Stock (Kardex)
 model StockMovement {
-  id          String            @id @default(uuid())
-  variantId   String
-  variant     ProductVariant    @relation(fields: [variantId], references: [id])
-  quantity    Int               // Positivo (entrada) o Negativo (salida)
-  type        StockMovementType
-  reason      String?
-  userId      String            // ID del usuario que hizo la acción
-  createdAt   DateTime          @default(now())
+  id        String            @id @default(uuid())
+  variantId String
+  variant   ProductVariant    @relation(fields: [variantId], references: [id])
+  quantity  Int // Positivo (entrada) o Negativo (salida)
+  type      StockMovementType
+  reason    String?
+  userId    String // ID del usuario que hizo la acción
+  createdAt DateTime          @default(now())
 
   @@index([variantId])
   @@index([createdAt])
@@ -138,41 +158,72 @@ model StockMovement {
 
 // 6. Ventas (Cabecera)
 model Sale {
-  id            String        @id @default(uuid())
-  total         Decimal       @db.Decimal(10, 2)
-  paymentMethod String        // "CASH", "TRANSFER", etc.
-  status        String        @default("COMPLETED") // "COMPLETED" o "CANCELLED"
-  createdAt     DateTime      @default(now())
-  
-  items         SaleItem[]
+  id            String  @id @default(uuid())
+  total         Decimal @db.Decimal(10, 2)
+  paymentMethod String // "CASH", "TRANSFER", "CHECKING_ACCOUNT" (si es fiado)
+  status        String  @default("COMPLETED") // "COMPLETED" (stock descontado) o "CANCELLED"
+
+  // NUEVO: Control de deuda cliente
+  paymentStatus PaymentStatus @default(PAID)
+  customerId    String?
+  customer      Customer?     @relation(fields: [customerId], references: [id])
+
+  // R-02: Fecha real de ingreso del dinero (Caja)
+  paidAt        DateTime?
+
+  createdAt DateTime @default(now())
+
+  items SaleItem[]
 
   @@index([createdAt])
+  @@index([paymentStatus])
+  @@index([customerId])
+  @@index([paidAt]) // Indexado para reportes de caja rápidos
 }
 
 // 7. Items de Venta (Detalle)
 model SaleItem {
-  id            String         @id @default(uuid())
-  saleId        String
-  sale          Sale           @relation(fields: [saleId], references: [id])
-  
-  // Puede ser null si vendemos un "Servicio" que no tiene stock
-  variantId     String?        
-  variant       ProductVariant? @relation(fields: [variantId], references: [id])
-  
-  description   String         // Guardamos el nombre tal cual se vendió (snapshot)
-  quantity      Int
-  
-  // SNAPSHOT DE PRECIOS: Fundamental para liquidar correctamente aunque cambien los precios después
-  costAtSale    Decimal        @db.Decimal(10, 2)
-  priceAtSale   Decimal        @db.Decimal(10, 2)
-  
-  // CONTROL DE LIQUIDACIÓN AL DUEÑO
-  isSettled     Boolean        @default(false) // ¿Ya se le pagó al dueño?
-  settlementId  String?
-  settlement    Settlement?    @relation(fields: [settlementId], references: [id])
+  id     String @id @default(uuid())
+  saleId String
+  sale   Sale   @relation(fields: [saleId], references: [id])
 
-  @@index([isSettled])
+  // Puede ser null si vendemos un "Servicio" que no tiene stock
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id])
+
+  description String // Guardamos el nombre tal cual se vendió (snapshot)
+  quantity    Int
+
+  // SNAPSHOT DE PRECIOS
+  costAtSale  Decimal @db.Decimal(10, 2)
+  priceAtSale Decimal @db.Decimal(10, 2)
+
+  // NUEVO: CONTROL DE LIQUIDACIÓN PARCIAL
+  // Eliminamos 'isSettled' (bool) y usamos un contador.
+  // Si settledQuantity < quantity, significa que falta liquidar al dueño.
+  settledQuantity Int @default(0)
+
+  // Relación con las líneas de liquidación (donde se paga al dueño)
+  settlementLines SettlementLine[]
+
   @@index([saleId])
+}
+
+// NUEVO: Línea de Liquidación (Tabla intermedia para pagos parciales)
+model SettlementLine {
+  id String @id @default(uuid())
+
+  settlementId String
+  settlement   Settlement @relation(fields: [settlementId], references: [id])
+
+  saleItemId String
+  saleItem   SaleItem @relation(fields: [saleItemId], references: [id])
+
+  quantity Int // Cuántas unidades de ese item se están pagando AHORA
+  amount   Decimal @db.Decimal(10, 2) // Cuánta plata representa (quantity * costAtSale)
+
+  @@index([settlementId])
+  @@index([saleItemId])
 }
 
 // 8. Liquidaciones (Pagos a Dueños)
@@ -182,20 +233,21 @@ model Settlement {
   owner       Owner    @relation(fields: [ownerId], references: [id])
   totalAmount Decimal  @db.Decimal(10, 2) // Total pagado en este recibo
   createdAt   DateTime @default(now())
-  
-  items       SaleItem[]
+
+  // Antes items SaleItem[], ahora usamos la tabla intermedia
+  items       SettlementLine[]
   adjustments BalanceAdjustment[]
 }
 
 // 9. Ajustes de Saldo (Créditos/Débitos manuales a Dueños)
 model BalanceAdjustment {
-  id           String      @id @default(uuid())
-  ownerId      String
-  owner        Owner       @relation(fields: [ownerId], references: [id])
-  amount       Decimal     @db.Decimal(10, 2) // Negativo = Dueño debe al local. Positivo = Local debe al dueño.
-  description  String
-  
-  isApplied    Boolean     @default(false) // ¿Ya se descontó/pagó en una liquidación?
+  id          String  @id @default(uuid())
+  ownerId     String
+  owner       Owner   @relation(fields: [ownerId], references: [id])
+  amount      Decimal @db.Decimal(10, 2)
+  description String
+
+  isApplied    Boolean     @default(false)
   settlementId String?
   settlement   Settlement? @relation(fields: [settlementId], references: [id])
   createdAt    DateTime    @default(now())
@@ -205,16 +257,16 @@ model BalanceAdjustment {
 // MODELOS DE PELUQUERÍA
 // ==============================
 
-// 10. Clientes (Mascotas)
+// 10. Clientes (Mascotas) - Nota: Se mantiene separado de Customer por ahora
 model Pet {
-  id          String   @id @default(uuid())
-  name        String
-  ownerName   String   // Texto libre, no relacionado a la tabla Owner
-  ownerPhone  String?
-  breed       String?
-  notes       String?  // Alertas (ej: "Muerde", "Alergia")
-  
-  appointments Appointment[]
+  id         String  @id @default(uuid())
+  name       String
+  ownerName  String
+  ownerPhone String?
+  breed      String?
+  notes      String?
+
+  appointments  Appointment[]
   groomingNotes GroomingNote[]
 
   @@index([name])
@@ -229,12 +281,12 @@ model Appointment {
   startTime DateTime
   endTime   DateTime
   status    ApptStatus @default(PENDING)
-  
+
   @@index([startTime])
   @@index([status])
 }
 
-// 12. Notas Técnicas (Historial clínico de peluquería)
+// 12. Notas Técnicas
 model GroomingNote {
   id        String   @id @default(uuid())
   petId     String

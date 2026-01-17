@@ -4,9 +4,14 @@
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
 import { Role } from "@prisma/client"
-import { hashPassword } from "@/lib/auth" // 👈 Importamos la seguridad
+import { hashPassword, getSession } from "@/lib/auth" // 👈 Importamos getSession
 
 export async function createUser(formData: FormData) {
+  // 1. SEGURIDAD (R-03)
+  const session = await getSession()
+  if (!session) return { error: "No autorizado." }
+  if (session.role !== 'ADMIN') return { error: "Permisos insuficientes. Se requiere Administrador." }
+
   const name = formData.get("name") as string
   const email = formData.get("email") as string
   const password = formData.get("password") as string
@@ -25,14 +30,14 @@ export async function createUser(formData: FormData) {
       return { error: "El email ya está registrado." }
     }
 
-    // 🔒 AHORA ENCRIPTAMOS ANTES DE GUARDAR
+    // 🔒 Encriptamos antes de guardar
     const hashedPassword = await hashPassword(password)
 
     await prisma.user.create({
       data: {
         name,
         email,
-        password: hashedPassword, // Guardamos el hash, no el texto
+        password: hashedPassword,
         role
       }
     })
@@ -46,8 +51,11 @@ export async function createUser(formData: FormData) {
   }
 }
 
-// ... (El resto de funciones getUsers y deleteUser se mantienen igual)
 export async function getUsers() {
+    // Lectura protegida: Solo usuarios logueados pueden ver la lista
+    const session = await getSession()
+    if (!session) return { error: "No autorizado." }
+
     try {
         const users = await prisma.user.findMany({
             orderBy: { name: 'asc' },
@@ -60,10 +68,14 @@ export async function getUsers() {
 }
 
 export async function deleteUser(formData: FormData) {
+    // Seguridad Crítica: Solo admin borra usuarios
+    const session = await getSession()
+    if (!session || session.role !== 'ADMIN') return { error: "No autorizado." }
+
     const id = formData.get("id") as string
     try {
         await prisma.user.delete({ where: { id } })
         revalidatePath("/admin/users")
         return { success: true }
-    } catch (e) { return { error: "Error" } }
+    } catch (e) { return { error: "Error al eliminar" } }
 }

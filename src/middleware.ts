@@ -3,9 +3,12 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { jwtVerify } from "jose";
 
-const SECRET_KEY = new TextEncoder().encode(
-  process.env.JWT_SECRET || "clave-secreta-super-segura-cambiar-en-prod"
-);
+// R-01: Validación estricta de entorno.
+if (!process.env.JWT_SECRET) {
+  throw new Error("FATAL: JWT_SECRET no está definida en variables de entorno.");
+}
+
+const SECRET_KEY = new TextEncoder().encode(process.env.JWT_SECRET);
 
 // Rutas públicas (No requieren login)
 const publicRoutes = ["/login"];

@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma"
 import PosSystem from "@/components/PosSystem"
 
 export default async function PosPage() {
+  // 1. CARGAR PRODUCTOS
   const products = await prisma.product.findMany({
     where: { isActive: true },
     include: { 
@@ -13,7 +14,17 @@ export default async function PosPage() {
     orderBy: { name: 'asc' }
   })
 
-  // Mapeo (Lógica de servidor)
+  // 2. CARGAR CLIENTES (CORREGIDO)
+  const customers = await prisma.customer.findMany({
+    orderBy: { name: 'asc' },
+    select: { 
+        id: true, 
+        name: true 
+        // Eliminamos currentDebt de aquí porque no existe en la tabla
+    }
+  })
+
+  // Mapeo de Productos (Lógica de servidor existente)
   const groupedProducts = products.map(p => {
     const totalStock = p.variants.reduce((sum, v) => sum + v.stock, 0)
     const mainImage = p.variants.find(v => v.imageUrl)?.imageUrl || null
@@ -35,7 +46,7 @@ export default async function PosPage() {
   })
 
   return (
-    <div className="h-screen flex flex-col p-4 bg-background"> {/* 👈 AJUSTE AQUÍ */}
+    <div className="h-screen flex flex-col p-4 bg-background">
       <header className="mb-4 flex justify-between items-center">
         <h1 className="text-2xl font-bold text-foreground flex items-center gap-2">
             🛒 Punto de Venta
@@ -45,7 +56,8 @@ export default async function PosPage() {
         </div>
       </header>
       
-      <PosSystem products={groupedProducts} />
+      {/* Pasamos products Y customers */}
+      <PosSystem products={groupedProducts} customers={customers} />
     </div>
   )
 }

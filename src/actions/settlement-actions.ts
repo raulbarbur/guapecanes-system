@@ -5,95 +5,132 @@ import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
+type SettlementItemInput = {
+  id: string
+  type: 'SALE' | 'ADJUSTMENT'
+  quantity?: number 
+}
+
 export async function createSettlement(formData: FormData) {
   const ownerId = formData.get("ownerId") as string
+  const selectionJson = formData.get("selection") as string
   
-  if (!ownerId) return { error: "ID de dueño requerido" }
+  if (!ownerId || !selectionJson) {
+    return { error: "Datos incompletos para la liquidación." }
+  }
+
+  let selection: SettlementItemInput[] = []
+  try {
+    selection = JSON.parse(selectionJson)
+  } catch (e) {
+    return { error: "Formato de selección inválido." }
+  }
+
+  if (selection.length === 0) {
+    return { error: "No seleccionaste ningún ítem para pagar." }
+  }
 
   try {
-    // 1. BUSCAR CANDIDATOS (Snapshot)
-    // No usamos el servicio genérico getOwnerBalance aquí porque necesitamos los IDs específicos
-    // para "congelar" la liquidación y evitar race conditions.
-
-    const pendingSaleItems = await prisma.saleItem.findMany({
-      where: {
-        isSettled: false,
-        variant: { product: { ownerId: ownerId } }
-      },
-      select: { id: true, costAtSale: true, quantity: true }
-    })
-
-    const pendingAdjustments = await prisma.balanceAdjustment.findMany({
-      where: {
-        ownerId: ownerId,
-        isApplied: false
-      },
-      select: { id: true, amount: true }
-    })
-
-    // 2. CALCULAR TOTAL A PAGAR (En memoria)
-    const debtFromSales = pendingSaleItems.reduce((sum, item) => {
-        return sum + (Number(item.costAtSale) * item.quantity)
-    }, 0)
-
-    const debtFromAdjustments = pendingAdjustments.reduce((sum, adj) => {
-        return sum + Number(adj.amount)
-    }, 0)
-
-    const totalToPay = debtFromSales + debtFromAdjustments
-
-    // 3. VALIDACIÓN FINANCIERA
-    // Solo permitimos liquidar si el saldo es positivo (A favor del dueño).
-    // Si es negativo (El dueño nos debe), esperamos a que venda más cosas para compensar.
-    if (totalToPay <= 0) {
-        return { 
-            error: `No se puede liquidar. El saldo es $${totalToPay.toLocaleString()}. Solo se registran pagos cuando hay deuda a favor del dueño.` 
-        }
-    }
-
-    // 4. TRANSACCIÓN DE ESCRITURA (Atomicidad Estricta)
     await prisma.$transaction(async (tx) => {
       
-      // A. Crear Recibo (Settlement)
       const newSettlement = await tx.settlement.create({
         data: {
           ownerId,
-          totalAmount: totalToPay,
+          totalAmount: 0,
         }
       })
 
-      // B. Marcar items específicos como pagados
-      // Usamos los IDs capturados en el paso 1. Si entró una venta nueva hace 1ms, 
-      // no está en esta lista y quedará para la próxima. Seguro.
-      if (pendingSaleItems.length > 0) {
-          await tx.saleItem.updateMany({
-            where: {
-              id: { in: pendingSaleItems.map(i => i.id) }
-            },
-            data: { isSettled: true, settlementId: newSettlement.id }
-          })
+      let calculatedTotal = 0
+
+      for (const item of selection) {
+        
+        if (item.type === 'SALE') {
+            if (!item.quantity || item.quantity <= 0) {
+                throw new Error(`Cantidad inválida para item ${item.id}`)
+            }
+
+            // Buscamos item + VENTA PADRE para verificar estado
+            const dbItem = await tx.saleItem.findUnique({
+                where: { id: item.id },
+                include: { 
+                    variant: { include: { product: true } },
+                    sale: true // 👈 Necesario para validar paymentStatus
+                }
+            })
+
+            if (!dbItem) throw new Error(`Item de venta no encontrado: ${item.id}`)
+            
+            // VALIDACIONES
+            if (dbItem.variant?.product.ownerId !== ownerId) {
+                throw new Error(`El item ${dbItem.description} no pertenece a este dueño.`)
+            }
+
+            // ⛔ REGLA DE NEGOCIO CRÍTICA ⛔
+            if (dbItem.sale.paymentStatus !== 'PAID') {
+                throw new Error(`No se puede liquidar "${dbItem.description}" porque el cliente AÚN NO PAGÓ (Es Fiado).`)
+            }
+
+            const pendingQty = dbItem.quantity - dbItem.settledQuantity
+            if (item.quantity > pendingQty) {
+                throw new Error(`Error en ${dbItem.description}: Intentás pagar ${item.quantity} pero solo se deben ${pendingQty}.`)
+            }
+
+            // Cálculos
+            const lineAmount = Number(dbItem.costAtSale) * item.quantity
+            calculatedTotal += lineAmount
+
+            await tx.settlementLine.create({
+                data: {
+                    settlementId: newSettlement.id,
+                    saleItemId: dbItem.id,
+                    quantity: item.quantity,
+                    amount: lineAmount
+                }
+            })
+
+            await tx.saleItem.update({
+                where: { id: dbItem.id },
+                data: { settledQuantity: { increment: item.quantity } }
+            })
+
+        } else if (item.type === 'ADJUSTMENT') {
+            const dbAdj = await tx.balanceAdjustment.findUnique({
+                where: { id: item.id }
+            })
+
+            if (!dbAdj) throw new Error(`Ajuste no encontrado: ${item.id}`)
+            if (dbAdj.ownerId !== ownerId) throw new Error("Ajuste ajeno.")
+            if (dbAdj.isApplied) throw new Error("Este ajuste ya fue pagado.")
+
+            calculatedTotal += Number(dbAdj.amount)
+
+            await tx.balanceAdjustment.update({
+                where: { id: dbAdj.id },
+                data: { 
+                    isApplied: true,
+                    settlementId: newSettlement.id
+                }
+            })
+        }
       }
 
-      // C. Marcar ajustes específicos como aplicados
-      if (pendingAdjustments.length > 0) {
-          await tx.balanceAdjustment.updateMany({
-              where: { 
-                  id: { in: pendingAdjustments.map(a => a.id) }
-              },
-              data: { isApplied: true, settlementId: newSettlement.id }
-          })
+      if (calculatedTotal <= 0) {
+        throw new Error(`El total a pagar es $${calculatedTotal}. No se pueden registrar liquidaciones negativas o en cero.`)
       }
+
+      await tx.settlement.update({
+        where: { id: newSettlement.id },
+        data: { totalAmount: calculatedTotal }
+      })
     })
 
     revalidatePath("/owners/balance")
     revalidatePath(`/owners/settlement/${ownerId}`)
     revalidatePath(`/owners/${ownerId}`)
+    return { success: true }
     
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error en liquidación:", error)
-    return { error: "Error interno al procesar el pago." }
+    return { error: error.message || "Error interno al procesar el pago." }
   }
-
-  // Éxito: Redirigir al balance general
-  redirect("/owners/balance")
 }

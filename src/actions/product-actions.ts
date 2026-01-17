@@ -4,6 +4,7 @@
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
+import { getSession } from "@/lib/auth" // 👈 Importamos seguridad
 
 // --- TIPOS INTERNOS ---
 type VariantInput = {
@@ -69,9 +70,13 @@ function validateVariants(variants: VariantInput[]): string | null {
 }
 
 
-// --- ACTIONS PÚBLICAS ---
+// --- ACTIONS PÚBLICAS PROTEGIDAS ---
 
 export async function createProduct(formData: FormData) {
+  // R-03: Verificación de sesión
+  const session = await getSession()
+  if (!session) return { error: "Sesión expirada. Por favor, logueate nuevamente." }
+
   const name = formData.get("name") as string
   const description = formData.get("description") as string
   const ownerId = formData.get("ownerId") as string
@@ -114,10 +119,10 @@ export async function createProduct(formData: FormData) {
             data: {
                 productId: newProduct.id,
                 name: v.name,
-                imageUrl: imageUrl || null, // Comparten imagen por ahora
+                imageUrl: imageUrl || null,
                 costPrice: v.costPrice,
                 salePrice: v.salePrice,
-                stock: 0 // Regla: Siempre nace en 0. Se carga por Inventario.
+                stock: 0 
             }
         })
       }
@@ -133,6 +138,10 @@ export async function createProduct(formData: FormData) {
 }
 
 export async function updateProduct(formData: FormData) {
+  // R-03: Verificación de sesión
+  const session = await getSession()
+  if (!session) return { error: "No autorizado." }
+
   const id = formData.get("id") as string
   const name = formData.get("name") as string
   const description = formData.get("description") as string
@@ -167,25 +176,23 @@ export async function updateProduct(formData: FormData) {
       // 3. Upsert Manual de Variantes
       for (const v of variants) {
         if (v.id) {
-            // A. Si tiene ID, actualizamos
             await tx.productVariant.update({
                 where: { id: v.id },
                 data: {
                     name: v.name,
                     costPrice: v.costPrice,
                     salePrice: v.salePrice,
-                    imageUrl: imageUrl || undefined // Actualiza si hay nueva imagen
+                    imageUrl: imageUrl || undefined 
                 }
             })
         } else {
-            // B. Si NO tiene ID, creamos
             await tx.productVariant.create({
                 data: {
                     productId: id,
                     name: v.name,
                     costPrice: v.costPrice,
                     salePrice: v.salePrice,
-                    stock: 0, // Las nuevas variantes nacen sin stock
+                    stock: 0,
                     imageUrl: imageUrl || null
                 }
             })
@@ -199,8 +206,6 @@ export async function updateProduct(formData: FormData) {
 
   } catch (error: any) {
     console.error("Error actualizando:", error)
-    
-    // Manejo de Error de Unicidad (Nombre de variante duplicado en mismo producto)
     if (error.code === 'P2002') {
         return { error: "No pueden haber dos variantes con el mismo nombre." }
     }
@@ -209,8 +214,11 @@ export async function updateProduct(formData: FormData) {
 }
 
 export async function toggleProductStatus(productId: string, currentStatus: boolean) {
+  // R-03: Verificación de sesión
+  const session = await getSession()
+  if (!session) return { error: "No autorizado." }
+
   try {
-    // Regla: No archivar si hay stock físico real
     if (currentStatus === true) { 
       const variantWithStock = await prisma.productVariant.findFirst({ 
         where: { productId, stock: { gt: 0 } }

@@ -2,31 +2,35 @@
 import { prisma } from "@/lib/prisma"
 
 export type OwnerBalance = {
-  debtFromSales: number     // Dinero por ventas no liquidadas (+)
-  debtFromAdjustments: number // Ajustes manuales/devoluciones (+ o -)
-  totalNetDebt: number      // El total final (lo que se va a pagar)
-  pendingItemsCount: number // Cantidad de productos vendidos sin pagar
+  debtFromSales: number
+  debtFromAdjustments: number
+  totalNetDebt: number
+  pendingItemsCount: number
 }
 
-/**
- * Calcula la deuda exacta que el sistema (Local) tiene con un Dueño.
- * Positivo = El local debe pagarle al dueño.
- * Negativo = El dueño le debe al local (saldo a favor local).
- */
 export async function getOwnerBalance(ownerId: string): Promise<OwnerBalance> {
-  // 1. Buscar Ventas Pendientes (Items vendidos pero no liquidados)
-  const pendingSaleItems = await prisma.saleItem.findMany({
+  
+  // 1. BUSCAR CANDIDATOS
+  const allOwnerItems = await prisma.saleItem.findMany({
     where: {
-      isSettled: false,
-      variant: { product: { ownerId: ownerId } }
+      variant: { product: { ownerId: ownerId } },
+      sale: { 
+          status: 'COMPLETED',       // Venta válida (no anulada)
+          paymentStatus: 'PAID'      // 👈 CRÍTICO: Solo pagamos si ya cobramos
+      } 
     },
     select: {
+      id: true,
       quantity: true,
+      settledQuantity: true,
       costAtSale: true
     }
   })
 
-  // 2. Buscar Ajustes Pendientes (Créditos o Débitos manuales no aplicados)
+  // 2. FILTRAR PENDIENTES
+  const pendingItems = allOwnerItems.filter(item => item.settledQuantity < item.quantity)
+
+  // 3. BUSCAR AJUSTES PENDIENTES
   const pendingAdjustments = await prisma.balanceAdjustment.findMany({
     where: {
       ownerId: ownerId,
@@ -37,9 +41,11 @@ export async function getOwnerBalance(ownerId: string): Promise<OwnerBalance> {
     }
   })
 
-  // 3. Cálculos en memoria (Más seguro que SQL raw para manejo de decimales JS)
-  const debtFromSales = pendingSaleItems.reduce((sum, item) => {
-    return sum + (Number(item.costAtSale) * item.quantity)
+  // 4. CÁLCULO
+  const debtFromSales = pendingItems.reduce((sum, item) => {
+    const remainingQuantity = item.quantity - item.settledQuantity
+    const debtForThisItem = Number(item.costAtSale) * remainingQuantity
+    return sum + debtForThisItem
   }, 0)
 
   const debtFromAdjustments = pendingAdjustments.reduce((sum, adj) => {
@@ -48,10 +54,14 @@ export async function getOwnerBalance(ownerId: string): Promise<OwnerBalance> {
 
   const totalNetDebt = debtFromSales + debtFromAdjustments
 
+  const pendingItemsCount = pendingItems.reduce((acc, item) => {
+    return acc + (item.quantity - item.settledQuantity)
+  }, 0)
+
   return {
     debtFromSales,
     debtFromAdjustments,
     totalNetDebt,
-    pendingItemsCount: pendingSaleItems.reduce((acc, item) => acc + item.quantity, 0)
+    pendingItemsCount
   }
 }

@@ -3,8 +3,13 @@
 
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
+import { getSession } from "@/lib/auth"
 
 export async function createCategory(formData: FormData) {
+  const session = await getSession()
+  // Mantenemos la estructura de error consistente con este archivo
+  if (!session) return { success: false, error: "No autorizado" }
+
   const name = formData.get("name") as string
 
   if (!name) return

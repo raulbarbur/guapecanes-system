@@ -2,11 +2,12 @@
 'use server'
 
 import { prisma } from "@/lib/prisma"
+import { getSession } from "@/lib/auth" // 👈 Importamos seguridad
 
 // Definimos la nueva estructura esperada (incluye variantName)
 type ImportRow = {
   name: string
-  variantName?: string // 👈 Campo nuevo opcional
+  variantName?: string 
   categoryName: string
   ownerName: string
   cost: number
@@ -23,16 +24,33 @@ function toTitleCase(str: string) {
 
 export async function importSingleProduct(data: ImportRow) {
   try {
-    // 1. SANITIZACIÓN Y VALIDACIÓN (Fail Fast)
-    if (!data.name || !data.categoryName || !data.ownerName) {
-      return { success: false, error: "Datos incompletos: Faltan Nombre, Categoría o Dueño." }
+    // 0. SEGURIDAD (R-03: Defensa en Profundidad)
+    const session = await getSession()
+    if (!session) {
+        return { success: false, error: "No autorizado. Sesión inválida." }
     }
 
+    // 1. SANITIZACIÓN Y VALIDACIÓN (R-04: Validación estricta de tipos)
+    if (typeof data !== 'object' || data === null) {
+        return { success: false, error: "Datos corruptos o formato inválido." }
+    }
+
+    // Convertimos explícitamente a string y limpiamos espacios
+    const name = String(data.name || "").trim()
+    const categoryName = String(data.categoryName || "").trim()
+    const ownerName = String(data.ownerName || "").trim()
+    
+    // Validación de campos vacíos
+    if (!name || !categoryName || !ownerName) {
+      return { success: false, error: "Faltan datos: Nombre, Categoría o Dueño." }
+    }
+
+    // Conversión segura de números
     const cost = Number(data.cost)
     const price = Number(data.price)
 
     if (isNaN(cost) || isNaN(price)) {
-      return { success: false, error: "Formato inválido: Costo y Precio deben ser números." }
+      return { success: false, error: `Importes inválidos para producto "${name}".` }
     }
 
     // 2. REGLAS FINANCIERAS (Guard Clauses)
@@ -45,25 +63,23 @@ export async function importSingleProduct(data: ImportRow) {
     }
 
     // 3. NORMALIZAR DATOS
-    const productName = data.name.trim()
-    // Si no ponen variante, asumimos "Estándar"
-    const variantName = data.variantName && data.variantName.trim() !== "" 
-        ? data.variantName.trim() 
+    const variantName = data.variantName && String(data.variantName).trim() !== "" 
+        ? String(data.variantName).trim() 
         : "Estándar"
     
     // 4. BUSCAR O CREAR ENTIDADES RELACIONADAS (Dueño y Categoría)
     
     // A. Dueño
     const owner = await prisma.owner.findFirst({
-      where: { name: { equals: data.ownerName, mode: 'insensitive' } }
+      where: { name: { equals: ownerName, mode: 'insensitive' } }
     })
 
     if (!owner) {
-      return { success: false, error: `Dueño desconocido: "${data.ownerName}". Crealo en el sistema primero.` }
+      return { success: false, error: `Dueño desconocido: "${ownerName}". Crealo en el sistema primero.` }
     }
 
     // B. Categoría (Upsert manual)
-    const normalizedCategory = toTitleCase(data.categoryName.trim())
+    const normalizedCategory = toTitleCase(categoryName)
     let category = await prisma.category.findFirst({
       where: { name: { equals: normalizedCategory, mode: 'insensitive' } }
     })
@@ -79,7 +95,7 @@ export async function importSingleProduct(data: ImportRow) {
     // Buscamos si el Producto Padre ya existe para este dueño
     const existingProduct = await prisma.product.findFirst({
         where: {
-            name: { equals: productName, mode: 'insensitive' },
+            name: { equals: name, mode: 'insensitive' },
             ownerId: owner.id
         }
     })
@@ -96,7 +112,7 @@ export async function importSingleProduct(data: ImportRow) {
         })
 
         if (existingVariant) {
-            return { success: false, error: `Omitido: Ya existe la variante "${variantName}" en "${productName}".` }
+            return { success: false, error: `Omitido: Ya existe la variante "${variantName}" en "${name}".` }
         }
 
         // Crear la variante nueva en el producto existente
@@ -116,7 +132,7 @@ export async function importSingleProduct(data: ImportRow) {
         
         await prisma.product.create({
             data: {
-                name: productName,
+                name: name,
                 categoryId: category.id,
                 ownerId: owner.id,
                 isActive: true,

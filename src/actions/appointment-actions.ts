@@ -4,17 +4,27 @@
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
 import { buildArgentinaDate } from "@/lib/utils"
+import { getSession } from "@/lib/auth"
 
 type ApptStatus = 'PENDING' | 'CONFIRMED' | 'COMPLETED' | 'BILLED' | 'CANCELLED'
 
 export async function createAppointment(formData: FormData) {
+  const session = await getSession()
+  if (!session) return { error: "No autorizado" }
+
   const petId = formData.get("petId") as string
   const dateStr = formData.get("date") as string // "2024-01-20"
   const timeStr = formData.get("time") as string // "14:30"
+  // Si no viene o es 0/NaN, asume 60. Si viene un número negativo o gigante, lo captura la variable.
   const duration = parseInt(formData.get("duration") as string) || 60 
 
   if (!petId || !dateStr || !timeStr) {
     return { error: "Faltan datos (Mascota, Fecha u Hora)" }
+  }
+
+  // R-04: Validación de rango de duración
+  if (duration <= 0 || duration > 480) {
+      return { error: "La duración del turno debe ser entre 1 y 480 minutos." }
   }
 
   try {
@@ -76,6 +86,9 @@ export async function createAppointment(formData: FormData) {
 }
 
 export async function cancelAppointment(formData: FormData) {
+    const session = await getSession()
+    if (!session) return { error: "No autorizado" }
+
     const id = formData.get("id") as string
 
     if (!id) return { error: "ID no provisto" }
@@ -116,6 +129,9 @@ export async function cancelAppointment(formData: FormData) {
 }
 
 export async function updateAppointmentStatus(id: string, newStatus: ApptStatus) {
+    const session = await getSession()
+    if (!session) return { error: "No autorizado" }
+
     try {
         // 1. LEER ESTADO ACTUAL
         const currentAppt = await prisma.appointment.findUnique({

@@ -11,7 +11,14 @@ export default async function OwnersBalancePage() {
         include: {
           variants: {
             include: {
-              saleItems: { where: { isSettled: false } },
+              saleItems: { 
+                where: { 
+                    sale: { 
+                        status: 'COMPLETED',
+                        paymentStatus: 'PAID' // 👈 FILTRO
+                    } 
+                }
+              },
             },
           },
         },
@@ -28,8 +35,11 @@ export default async function OwnersBalancePage() {
     owner.products.forEach((product) => {
       product.variants.forEach((variant) => {
         variant.saleItems.forEach((item) => {
-          debtFromSales += Number(item.costAtSale) * item.quantity;
-          itemsCount += item.quantity;
+          const remainingQty = item.quantity - item.settledQuantity;
+          if (remainingQty > 0) {
+            debtFromSales += Number(item.costAtSale) * remainingQty;
+            itemsCount += remainingQty;
+          }
         });
       });
     });
@@ -102,7 +112,7 @@ export default async function OwnersBalancePage() {
                     
                     <td className="p-5 text-center">
                         <span className="bg-secondary text-secondary-foreground px-3 py-1 rounded-lg text-sm font-bold">
-                            {row.itemsCount}
+                            {row.itemsCount} u.
                         </span>
                     </td>
                     
