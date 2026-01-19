@@ -1,44 +1,90 @@
 // src/app/categories/page.tsx
-import { createCategory } from "@/actions/category-actions"
-import { prisma } from "@/lib/prisma"
+
+// 👇 CAMBIO REALIZADO AQUÍ 👇
+// Forzar el renderizado dinámico para evitar el conflicto con el middleware durante el build.
+export const dynamic = 'force-dynamic'
+
+import { createCategory } from '@/actions/category-actions';
+import { prisma } from '@/lib/prisma';
+import { AppCard } from '@/components/ui/shared/AppCard';
+import { PageHeader } from '@/components/ui/shared/PageHeader';
+import { SubmitButton } from '@/components/ui/SubmitButton';
+import { revalidatePath } from 'next/cache';
 
 export default async function CategoriesPage() {
   const categories = await prisma.category.findMany({
-    orderBy: { name: 'asc' } // Orden alfabético
-  })
+    orderBy: {
+      name: 'asc'
+    }
+  });
+
+  // La función "wrapper" para el formulario sigue siendo necesaria para el tipado del 'action'.
+  async function handleCreateCategory(formData: FormData) {
+    'use server';
+
+    const name = formData.get('name') as string;
+    if (!name || name.trim().length === 0) {
+      return;
+    }
+
+    await createCategory(formData);
+    revalidatePath('/categories');
+  }
 
   return (
-    <div className="p-10 max-w-2xl mx-auto">
-      <h1 className="text-3xl font-bold mb-8">Categorías de Productos</h1>
+    <div className="p-4 md:p-8 max-w-4xl mx-auto space-y-6">
+      <PageHeader
+        title="Gestión de Categorías"
+        description="Añade o modifica las categorías de tus productos."
+      />
 
       {/* FORMULARIO */}
-      <div className="bg-white p-6 rounded-lg shadow-md mb-10 border">
-        <form action={createCategory} className="flex gap-4">
-          <input 
-            name="name" 
-            type="text" 
-            required 
-            className="border p-2 rounded flex-1" 
-            placeholder="Ej: Alimentos, Accesorios..."
+      <AppCard>
+        <form action={handleCreateCategory} className="flex flex-col md:flex-row gap-4">
+          <input
+            name="name"
+            type="text"
+            placeholder="Nombre de la nueva categoría..."
+            required
+            className="w-full border border-input bg-background p-2 rounded-lg text-sm focus:ring-2 focus:ring-ring outline-none transition"
           />
-          <button 
-            type="submit" 
-            className="bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700"
-          >
-            Agregar
-          </button>
+          <SubmitButton loadingText="Creando..." className="w-full md:w-auto">
+            Crear Categoría
+          </SubmitButton>
         </form>
-      </div>
+      </AppCard>
 
-      {/* LISTADO */}
-      <div className="grid grid-cols-2 gap-4">
-        {categories.map((cat) => (
-          <div key={cat.id} className="border p-4 rounded bg-gray-50 flex justify-between items-center">
-            <span className="font-semibold">{cat.name}</span>
-            <span className="text-xs text-gray-400">ID: {cat.id.slice(0, 8)}...</span>
-          </div>
-        ))}
-      </div>
+      {/* LISTADO DE CATEGORÍAS */}
+      <AppCard noPadding>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead className="bg-muted/50 text-muted-foreground uppercase text-xs font-bold border-b border-border">
+              <tr>
+                <th className="p-4 pl-6">Nombre</th>
+                <th className="p-4 text-right">Acciones</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {categories.length === 0 ? (
+                <tr>
+                  <td colSpan={2} className="p-12 text-center text-muted-foreground">
+                    No hay categorías creadas.
+                  </td>
+                </tr>
+              ) : (
+                categories.map((category) => (
+                  <tr key={category.id}>
+                    <td className="p-4 pl-6 font-medium">{category.name}</td>
+                    <td className="p-4 text-right">
+                      {/* Aquí irían los botones de Editar/Eliminar */}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </AppCard>
     </div>
-  )
+  );
 }

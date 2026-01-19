@@ -1,18 +1,27 @@
-// src/components/ProductForm.tsx
 'use client'
 
 import { useState } from "react"
 import { createProduct, updateProduct } from "@/actions/product-actions"
-import ImageUpload from "./ImageUpload"
+import dynamic from 'next/dynamic'
 import { useRouter } from "next/navigation"
+import Image from "next/image" // ✅ Importamos Image para previsualizar sin errores
+import { cn } from "@/lib/utils"
+import { useToast } from "@/components/ui/Toast"
+import { SubmitButton } from "@/components/ui/SubmitButton" 
+import { CollapsibleSection } from "@/components/ui/CollapsibleSection"
 
-// Tipo para las variantes en el estado local
+// Cargamos dinámicamente el uploader para evitar problemas de SSR
+const ImageUpload = dynamic(() => import('./ImageUpload'), {
+  loading: () => <p className="text-xs text-muted-foreground animate-pulse">Cargando módulo de imágenes...</p>,
+  ssr: false
+})
+
 type VariantItem = {
-  id?: string // Si tiene ID, existe en DB. Si no, es nueva.
+  id?: string 
   name: string
   costPrice: number
   salePrice: number
-  stock?: number // Solo lectura (el stock se mueve por inventario)
+  stock?: number 
 }
 
 type Props = {
@@ -25,36 +34,38 @@ type Props = {
     ownerId: string
     categoryId: string
     imageUrl: string | null
-    variants: VariantItem[] // 👈 Ahora recibimos lista
+    variants: VariantItem[]
   }
 }
 
 export default function ProductForm({ owners, categories, initialData }: Props) {
   const router = useRouter()
+  const { addToast } = useToast()
+  
+  // Estado local
   const [imageUrl, setImageUrl] = useState(initialData?.imageUrl || "")
-  const [loading, setLoading] = useState(false)
   const [isNewCategory, setIsNewCategory] = useState(false)
-
-  // ESTADO DE VARIANTES
-  // Si es nuevo producto, arrancamos con una variante "Estándar" por comodidad
   const [variants, setVariants] = useState<VariantItem[]>(
     initialData?.variants || [{ name: "Estándar", costPrice: 0, salePrice: 0 }]
   )
 
+  // Flag visual
+  const showImages = process.env.NEXT_PUBLIC_ENABLE_IMAGES === 'true'
+
+  // --- LÓGICA DE VARIANTES ---
   const addVariant = () => {
     setVariants([...variants, { name: "", costPrice: 0, salePrice: 0 }])
   }
 
   const removeVariant = (index: number) => {
-    // No permitimos vaciar la lista, mínimo 1 variante.
-    if (variants.length <= 1) return alert("Debe haber al menos una variante.")
-    
-    // Si tiene ID (existe en DB), advertimos que esto NO borra la variante de la DB en este form simple
-    // Para borrar variantes con historia se requiere otra lógica. Aquí solo la quitamos de la vista de edición.
-    if (variants[index].id) {
-       alert("⚠️ Nota: Las variantes ya guardadas no se eliminan desde aquí para proteger el historial de stock.\nSolo se ignorarán los cambios.")
+    if (variants.length <= 1) {
+        addToast("Debe haber al menos una variante.", "error")
+        return
     }
-
+    if (variants[index].id) {
+        addToast("Las variantes guardadas no se borran desde aquí para proteger el historial.", "info")
+        return
+    }
     const newList = [...variants]
     newList.splice(index, 1)
     setVariants(newList)
@@ -66,230 +77,182 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
     setVariants(newList)
   }
 
+  // --- SUBMIT ---
   const handleSubmit = async (formData: FormData) => {
-    // Validar antes de enviar
-    if (variants.some(v => !v.name.trim())) return alert("Todas las variantes deben tener nombre (Ej: Talle S)")
-    if (variants.some(v => v.salePrice < v.costPrice)) return alert("Revisá los precios: Hay variantes con rentabilidad negativa.")
+    // Validaciones Frontend
+    if (variants.some(v => !v.name.trim())) {
+        addToast("Todas las variantes deben tener un nombre.", "error")
+        return
+    }
+    if (variants.some(v => v.salePrice < v.costPrice)) {
+        addToast("Revisá los precios: Hay rentabilidad negativa.", "error")
+        return
+    }
 
-    setLoading(true)
-
-    // Agregamos la imagen si existe
+    // Preparar FormData
     if (imageUrl) formData.append("imageUrl", imageUrl)
-    
-    // Flag de categoría nueva
     if (isNewCategory) formData.append("isNewCategory", "true")
-
-    // 🔥 SERIALIZAMOS LAS VARIANTES
     formData.append("variantsJson", JSON.stringify(variants))
 
-    let result;
-
+    // Server Actions
     if (initialData) {
-        // MODO EDICIÓN
         formData.append("id", initialData.id)
-        result = await updateProduct(formData)
+        const result = await updateProduct(formData)
         
-        if (result?.success) {
-            alert("✅ Producto actualizado")
+        if (result && 'error' in result) {
+            addToast(result.error || "Error al actualizar.", "error")
+        } else {
+            addToast("Producto actualizado con éxito.", "success")
             router.push("/products")
             router.refresh()
-        } else {
-            alert("❌ Error: " + result?.error)
         }
-
     } else {
-        // MODO CREACIÓN
-        result = await createProduct(formData)
-        if (result?.error) alert("❌ Error: " + result.error)
+        const result = await createProduct(formData)
+
+        if (result && 'error' in result) {
+            addToast(result.error || "Error al crear.", "error")
+        } else {
+            addToast("Producto creado con éxito.", "success")
+            router.refresh()
+        }
     }
-    
-    setLoading(false)
   }
 
+  // Estilos
+  const inputClass = "w-full border border-input bg-background p-2 rounded-lg text-sm focus:ring-2 focus:ring-ring outline-none transition"
+  const labelClass = "block text-xs font-bold text-muted-foreground uppercase mb-1.5"
+
   return (
-    <div className="bg-white p-6 rounded-lg shadow-md max-w-4xl mx-auto border">
-      <h2 className="text-xl font-bold mb-6 text-gray-800">
-        {initialData ? "Editar Producto y Variantes" : "Nuevo Producto"}
+    <div className="bg-card p-6 rounded-3xl shadow-sm border border-border">
+      <h2 className="text-xl font-black text-foreground mb-6 font-nunito">
+        {initialData ? "Editar Producto" : "Nuevo Producto"}
       </h2>
       
       <form action={handleSubmit} className="space-y-6">
         
-        {/* === DATOS GENERALES === */}
+        {/* BLOQUE 1: DATOS PRINCIPALES (Visible siempre) */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-4">
                 <div>
-                    <label className="block text-sm font-bold text-gray-700">Nombre del Producto *</label>
-                    <input 
-                        name="name" 
-                        defaultValue={initialData?.name} 
-                        type="text" 
-                        required 
-                        placeholder="Ej: Collar de Cuero"
-                        className="w-full border p-2 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
-                    />
-                </div>
-                <div>
-                    <label className="block text-sm font-bold text-gray-700">Descripción</label>
-                    <textarea 
-                        name="description" 
-                        defaultValue={initialData?.description || ""} 
-                        className="w-full border p-2 rounded focus:ring-2 focus:ring-blue-500 outline-none" 
-                        rows={2} 
-                    />
+                    <label className={labelClass}>Nombre del Producto *</label>
+                    <input name="name" defaultValue={initialData?.name} type="text" required placeholder="Ej: Collar de Cuero" className={inputClass} autoFocus />
                 </div>
             </div>
-
-            <div className="space-y-4">
+            
+            <div className="grid grid-cols-2 gap-4">
                  <div>
-                    <label className="block text-sm font-bold text-gray-700">Dueño *</label>
-                    <select 
-                        name="ownerId" 
-                        defaultValue={initialData?.ownerId || ""} 
-                        required 
-                        className="w-full border p-2 rounded bg-white focus:ring-2 focus:ring-blue-500 outline-none"
-                    >
+                    <label className={labelClass}>Dueño *</label>
+                    <select name="ownerId" defaultValue={initialData?.ownerId || ""} required className={inputClass}>
                         <option value="">Seleccionar...</option>
-                        {owners.map(o => (
-                            <option key={o.id} value={o.id}>{o.name}</option>
-                        ))}
+                        {owners.map(o => (<option key={o.id} value={o.id}>{o.name}</option>))}
                     </select>
                 </div>
-
                 <div>
                     <div className="flex justify-between items-center mb-1">
-                        <label className="block text-sm font-bold text-gray-700">Categoría *</label>
-                        <button 
-                            type="button"
-                            onClick={() => setIsNewCategory(!isNewCategory)}
-                            className="text-xs text-blue-600 font-bold hover:underline"
-                        >
-                            {isNewCategory ? "Volver a Lista" : "+ Nueva"}
+                        <label className={labelClass}>Categoría *</label>
+                        <button type="button" onClick={() => setIsNewCategory(!isNewCategory)} className="text-[10px] text-primary font-bold hover:underline uppercase">
+                            {isNewCategory ? "Cancelar" : "+ Nueva"}
                         </button>
                     </div>
                     {isNewCategory ? (
-                        <input 
-                            name="categoryName"
-                            type="text"
-                            placeholder="Nueva categoría..."
-                            className="w-full border p-2 rounded bg-blue-50 focus:ring-2 focus:ring-blue-500 outline-none"
-                        />
+                        <input name="categoryName" type="text" placeholder="Nombre nueva..." className={cn(inputClass, "bg-primary/5 border-primary/20")} />
                     ) : (
-                        <select 
-                            name="categoryId" 
-                            defaultValue={initialData?.categoryId || ""} 
-                            required 
-                            className="w-full border p-2 rounded bg-white focus:ring-2 focus:ring-blue-500 outline-none"
-                        >
+                        <select name="categoryId" defaultValue={initialData?.categoryId || ""} required className={inputClass}>
                             <option value="">Seleccionar...</option>
-                            {categories.map(c => (
-                                <option key={c.id} value={c.id}>{c.name}</option>
-                            ))}
+                            {categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
                         </select>
                     )}
                 </div>
             </div>
         </div>
 
-        <hr className="border-gray-200" />
-
-        {/* === VARIANTES (TABLA DINÁMICA) === */}
-        <div>
-            <div className="flex justify-between items-end mb-2">
-                <label className="text-sm font-bold text-gray-700">Variantes / Talles / Colores</label>
-                <button 
-                    type="button" 
-                    onClick={addVariant}
-                    className="text-xs bg-slate-800 text-white px-3 py-1 rounded hover:bg-black font-bold"
-                >
+        {/* BLOQUE 2: VARIANTES Y PRECIOS (Core) */}
+        <div className="bg-muted/30 p-4 rounded-xl border border-border">
+            <div className="flex justify-between items-center mb-4">
+                <label className="text-sm font-bold text-foreground">Variantes y Precios</label>
+                <button type="button" onClick={addVariant} className="text-xs bg-foreground text-background px-3 py-1.5 rounded-lg hover:opacity-90 font-bold transition">
                     + Agregar Variante
                 </button>
             </div>
-            
-            <div className="border rounded-lg overflow-hidden shadow-sm">
-                <table className="w-full text-sm">
-                    <thead className="bg-gray-100 text-gray-600 font-bold uppercase text-xs">
-                        <tr>
-                            <th className="p-3 text-left">Variante (Ej: "XL")</th>
-                            <th className="p-3 text-left w-32">Costo</th>
-                            <th className="p-3 text-left w-32">Venta</th>
-                            <th className="p-3 text-center w-20">Stock</th>
-                            <th className="p-3 w-10"></th>
-                        </tr>
-                    </thead>
-                    <tbody className="divide-y bg-white">
-                        {variants.map((variant, idx) => (
-                            <tr key={idx}>
-                                <td className="p-2">
-                                    <input 
-                                        type="text" 
-                                        value={variant.name}
-                                        onChange={(e) => updateVariant(idx, 'name', e.target.value)}
-                                        placeholder="Ej: Estándar, Rojo S..."
-                                        className="w-full border p-1.5 rounded focus:ring-2 focus:ring-blue-500 outline-none"
-                                    />
-                                </td>
-                                <td className="p-2">
-                                    <input 
-                                        type="number" 
-                                        step="0.01"
-                                        value={variant.costPrice}
-                                        onChange={(e) => updateVariant(idx, 'costPrice', parseFloat(e.target.value) || 0)}
-                                        className="w-full border p-1.5 rounded focus:ring-2 focus:ring-blue-500 outline-none"
-                                    />
-                                </td>
-                                <td className="p-2">
-                                    <input 
-                                        type="number" 
-                                        step="0.01"
-                                        value={variant.salePrice}
-                                        onChange={(e) => updateVariant(idx, 'salePrice', parseFloat(e.target.value) || 0)}
-                                        className="w-full border p-1.5 rounded focus:ring-2 focus:ring-blue-500 outline-none"
-                                    />
-                                </td>
-                                <td className="p-2 text-center text-gray-500 font-mono">
-                                    {variant.id ? variant.stock : '-'}
-                                </td>
-                                <td className="p-2 text-center">
-                                    <button 
-                                        type="button" 
-                                        onClick={() => removeVariant(idx)}
-                                        className="text-red-400 hover:text-red-600 font-bold px-2"
-                                        title="Quitar de la lista"
-                                    >
-                                        ✕
-                                    </button>
-                                </td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
+            <div className="space-y-2">
+                <div className="hidden md:grid grid-cols-12 gap-2 text-[10px] uppercase font-bold text-muted-foreground px-2">
+                    <div className="col-span-4">Nombre</div>
+                    <div className="col-span-3">Costo</div>
+                    <div className="col-span-3">Venta</div>
+                    <div className="col-span-1 text-center">Stock</div>
+                    <div className="col-span-1"></div>
+                </div>
+                {variants.map((variant, idx) => (
+                    <div key={idx} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center bg-card p-3 md:p-0 rounded-lg md:bg-transparent border md:border-0 border-border mb-2 md:mb-0 shadow-sm md:shadow-none">
+                        <div className="col-span-4">
+                            <span className="md:hidden text-xs font-bold text-muted-foreground block mb-1">Nombre Variante</span>
+                            <input type="text" value={variant.name} onChange={(e) => updateVariant(idx, 'name', e.target.value)} placeholder="Ej: XL, Rojo..." className={inputClass} />
+                        </div>
+                        <div className="col-span-3 flex items-center gap-1">
+                            <span className="text-xs text-muted-foreground md:hidden w-12">Costo:</span>
+                            <input type="number" step="0.01" value={variant.costPrice} onChange={(e) => updateVariant(idx, 'costPrice', parseFloat(e.target.value) || 0)} className={inputClass} />
+                        </div>
+                        <div className="col-span-3 flex items-center gap-1">
+                            <span className="text-xs text-muted-foreground md:hidden w-12">Venta:</span>
+                            <input type="number" step="0.01" value={variant.salePrice} onChange={(e) => updateVariant(idx, 'salePrice', parseFloat(e.target.value) || 0)} className={cn(inputClass, "font-bold text-green-600 dark:text-green-400")} />
+                        </div>
+                        <div className="col-span-1 text-center text-xs font-mono text-muted-foreground hidden md:block">
+                            {variant.id ? variant.stock : '-'}
+                        </div>
+                        <div className="col-span-1 text-right md:text-center">
+                            <button type="button" onClick={() => removeVariant(idx)} className="text-muted-foreground hover:text-destructive transition p-2 bg-muted md:bg-transparent rounded-lg">✕</button>
+                        </div>
+                    </div>
+                ))}
             </div>
-            <p className="text-xs text-gray-400 mt-2">
-                * El stock inicial de nuevas variantes es 0. Hacé un Ingreso de Mercadería luego de crear el producto.
-            </p>
         </div>
 
-        {/* === IMAGEN Y SUBMIT === */}
-        <div className="border-t pt-4 flex items-center justify-between">
-            <div className="w-1/2">
-                <ImageUpload onImageUpload={(url) => setImageUrl(url)} />
-                {imageUrl && <p className="text-xs text-green-600 mt-1">✓ Imagen lista para guardar</p>}
+        {/* BLOQUE 3: DETALLES (Colapsable) */}
+        <CollapsibleSection title="Detalles Adicionales" icon="📝">
+             <div>
+                <label className={labelClass}>Descripción (Opcional)</label>
+                <textarea 
+                    name="description" 
+                    defaultValue={initialData?.description || ""} 
+                    className={inputClass} 
+                    rows={3} 
+                    placeholder="Detalles internos o características..."
+                />
             </div>
-            
-            <button 
-                type="submit" 
-                disabled={loading}
-                className={`px-8 py-3 rounded font-bold text-white shadow transition
-                    ${loading 
-                        ? 'bg-gray-400 cursor-wait' 
-                        : 'bg-green-600 hover:bg-green-700 active:scale-95'
-                    }
-                `}
-            >
-                {loading ? "Guardando..." : "GUARDAR TODO"}
-            </button>
-        </div>
+        </CollapsibleSection>
 
+        {/* BLOQUE 4: IMAGEN (Colapsable) */}
+        {showImages && (
+            <CollapsibleSection title="Imagen del Producto" icon="📸" defaultOpen={!!imageUrl}>
+                <div className="pt-4 flex flex-col md:flex-row gap-6 items-start">
+                    {/* Previsualización manual para evitar el error de prop 'initialUrl' */}
+                    {imageUrl && (
+                         <div className="relative w-full aspect-video md:w-32 md:aspect-square rounded-xl overflow-hidden border border-border bg-muted shrink-0">
+                            <Image 
+                                src={imageUrl} 
+                                alt="Previsualización" 
+                                fill 
+                                className="object-cover"
+                            />
+                        </div>
+                    )}
+
+                    <div className="flex-1 w-full">
+                        <label className={labelClass}>
+                            {imageUrl ? "Cambiar Imagen" : "Subir Nueva"}
+                        </label>
+                        {/* Usamos el componente ImageUpload limpio, sin props inventadas */}
+                        <ImageUpload onImageUpload={(url) => setImageUrl(url)} />
+                    </div>
+                </div>
+            </CollapsibleSection>
+        )}
+
+        <div className="pt-4">
+            <SubmitButton loadingText="Guardando..." className="w-full py-4 text-lg">
+                GUARDAR PRODUCTO
+            </SubmitButton>
+        </div>
       </form>
     </div>
   )

@@ -3,8 +3,16 @@
 
 import { prisma } from "@/lib/prisma"
 import ExcelJS from "exceljs"
+import { getSession } from "@/lib/auth"
 
 export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
+  // R-01: Blindaje de seguridad RBAC
+  const session = await getSession()
+  // Validamos existencia de sesión Y rol de administrador
+  if (!session || session.role !== 'ADMIN') {
+    return { success: false, error: "Requiere permisos de Administrador." }
+  }
+
   try {
     // 1. Crear Libro y Hoja
     const workbook = new ExcelJS.Workbook()
@@ -31,6 +39,9 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
 
     // 3. Si es FULL, llenamos con datos
     if (mode === 'FULL') {
+      // R-02: Límite de seguridad para prevenir OOM (Out of Memory)
+      const SAFE_LIMIT = 2000 
+      
       const products = await prisma.product.findMany({
         where: { isActive: true }, // Solo activos
         include: {
@@ -38,7 +49,8 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
           owner: true,
           variants: true
         },
-        orderBy: { name: 'asc' }
+        orderBy: { name: 'asc' },
+        take: SAFE_LIMIT // 👈 Límite preventivo
       })
 
       // APLANAMOS LA DATA (Flatten)
@@ -57,7 +69,6 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
     }
 
     // 4. Generar Buffer y convertir a Base64
-    // (Server Actions no pueden retornar Streams directamente al cliente fácilmente todavía)
     const buffer = await workbook.xlsx.writeBuffer()
     const base64 = Buffer.from(buffer).toString("base64")
     
@@ -69,6 +80,6 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
 
   } catch (error) {
     console.error("Error exportando:", error)
-    return { success: false, error: "Error al generar el archivo Excel." }
+    return { success: false, error: "Error al generar el archivo Excel (Posible exceso de datos)." }
   }
 }

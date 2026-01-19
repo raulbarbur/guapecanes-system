@@ -11,35 +11,41 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
+ * FE-05: Formateador de moneda unificado.
+ * Maneja tanto números puros como objetos Decimal de Prisma.
+ */
+export function formatCurrency(value: number | string | object): string {
+  // Conversión segura a número
+  const numberValue = Number(value)
+
+  if (isNaN(numberValue)) return "$0"
+
+  return new Intl.NumberFormat("es-AR", {
+    style: "currency",
+    currency: "ARS",
+    minimumFractionDigits: 0, // Evita centavos si son .00 (más limpio)
+    maximumFractionDigits: 2,
+  }).format(numberValue)
+}
+
+/**
  * Devuelve la fecha actual en Argentina (GMT-3) en formato YYYY-MM-DD.
  * Útil para establecer el valor por defecto en inputs type="date".
  */
 export function getLocalDateISO(): string {
-  // Obtenemos la fecha actual
   const now = new Date()
-  
-  // Forzamos el offset de Argentina (-3 horas)
-  // Nota: Esto es una aproximación manual rápida para evitar librerías pesadas como date-fns-tz
   const offsetMs = -3 * 60 * 60 * 1000
   const argentinaTime = new Date(now.getTime() + offsetMs)
-  
   return argentinaTime.toISOString().split('T')[0]
 }
 
 /**
  * Construye un objeto Date asegurando que sea interpretado como GMT-3 (Argentina).
  * Prisma guardará esto en UTC, pero la conversión será correcta.
- * 
- * @param dateStr Formato "YYYY-MM-DD"
- * @param timeStr Formato "HH:MM" (opcional, default 00:00)
  */
 export function buildArgentinaDate(dateStr: string, timeStr: string = "00:00:00"): Date {
-  // Aseguramos formato de segundos
   const timeFull = timeStr.length === 5 ? `${timeStr}:00` : timeStr
-  
-  // Construimos string ISO con el offset explícito de Argentina
   const isoString = `${dateStr}T${timeFull}-03:00`
-  
   return new Date(isoString)
 }
 

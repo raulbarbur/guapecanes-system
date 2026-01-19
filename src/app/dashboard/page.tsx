@@ -1,36 +1,25 @@
 // src/app/dashboard/page.tsx
+
+export const dynamic = 'force-dynamic'
+
 import { prisma } from "@/lib/prisma"
 import Link from "next/link"
 import { getLocalDateISO } from "@/lib/utils"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs" // << IMPORTAR
 
 export default async function DashboardPage() {
   const now = new Date()
-  
-  const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
-  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1)
-
   const todayStr = getLocalDateISO() 
   const startOfToday = new Date(`${todayStr}T00:00:00`)
   const endOfToday = new Date(`${todayStr}T23:59:59`)
 
-  // Consultas Paralelas
-  const [monthSales, todaySales, todayAppointments, lowStockVariants] = await Promise.all([
-    // Ventas Mes
+  const [todaySales, todayAppointments, lowStockVariants] = await Promise.all([
     prisma.sale.findMany({
       where: {
         status: "COMPLETED",
-        createdAt: { gte: firstDayOfMonth, lt: nextMonth }
-      },
-      include: { items: true }
-    }),
-    // Ventas Hoy (Necesitamos saber el paymentMethod)
-    prisma.sale.findMany({
-      where: {
-        status: "COMPLETED",
-        createdAt: { gte: startOfToday, lte: endOfToday }
+        paidAt: { gte: startOfToday, lte: endOfToday } 
       }
     }),
-    // Turnos Hoy
     prisma.appointment.findMany({
       where: {
         startTime: { gte: startOfToday, lte: endOfToday },
@@ -39,7 +28,6 @@ export default async function DashboardPage() {
       include: { pet: true },
       orderBy: { startTime: 'asc' }
     }),
-    // Stock Bajo
     prisma.productVariant.findMany({
       where: { stock: { lte: 3 } },
       include: { product: true },
@@ -48,143 +36,171 @@ export default async function DashboardPage() {
     })
   ])
 
-  // Cálculos Mensuales
-  let monthRevenue = 0
-  let monthCost = 0
-  monthSales.forEach(sale => {
-    monthRevenue += Number(sale.total)
-    sale.items.forEach(item => { if (item.variantId) monthCost += Number(item.costAtSale) * item.quantity })
-  })
-  const monthProfit = monthRevenue - monthCost
-  const monthMargin = monthRevenue > 0 ? (monthProfit / monthRevenue) * 100 : 0
-
-  // Cálculos Diarios (Desglose por Medio de Pago)
-  const todayStats = {
-    total: 0,
-    cash: 0,
-    digital: 0, // Transfer + Tarjetas
-    transactions: todaySales.length
-  }
-
-  todaySales.forEach(sale => {
+  const stats = todaySales.reduce((acc, sale) => {
     const amount = Number(sale.total)
-    todayStats.total += amount
-    if (sale.paymentMethod === 'CASH') {
-        todayStats.cash += amount
-    } else {
-        todayStats.digital += amount
-    }
-  })
+    acc.total += amount
+    if (sale.paymentMethod === 'CASH') acc.cash += amount
+    else acc.digital += amount
+    return acc
+  }, { total: 0, cash: 0, digital: 0 })
 
   return (
-    <div className="p-8 max-w-7xl mx-auto">
-      <h1 className="text-3xl font-bold text-gray-800 mb-2">Tablero de Control</h1>
+    <div className="p-6 md:p-10 max-w-[1600px] mx-auto space-y-8 animate-in fade-in duration-500">
       
-      <p className="text-gray-500 mb-8 capitalize">
-        Resumen del {startOfToday.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' })}.
-      </p>
+      {/* HERO SECTION */}
+      <div className="flex flex-col md:flex-row justify-between items-end gap-4">
+        <div>
+          <h1 className="text-4xl font-black text-foreground font-nunito tracking-tight">
+            Hola, Equipo 👋
+          </h1>
+          <p className="text-muted-foreground font-medium mt-1">
+            Resumen de hoy, {new Date().toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' })}.
+          </p>
+        </div>
+        <Link href="/pos" className="bg-primary hover:bg-primary/90 text-primary-foreground px-6 py-3 rounded-2xl font-bold shadow-lg shadow-primary/20 transition active:scale-95 flex items-center gap-2">
+            🛒 Abrir Caja
+        </Link>
+      </div>
 
-      {/* SECCIÓN 1: CAJA DEL DÍA DETALLADA */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
+      {/* KPI GRID */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         
-        {/* Caja de Hoy (Principal) */}
-        <div className="bg-slate-900 text-white p-6 rounded-lg shadow-lg relative overflow-hidden">
-            <div className="relative z-10">
-                <p className="text-slate-400 text-sm font-bold uppercase tracking-wider">Ventas de Hoy</p>
-                <p className="text-4xl font-bold mt-2">${todayStats.total.toLocaleString()}</p>
-                <div className="mt-4 flex gap-4 text-sm">
-                    <div>
-                        <span className="block text-green-400 font-bold">💵 ${todayStats.cash.toLocaleString()}</span>
-                        <span className="text-slate-500 text-xs">Efectivo</span>
-                    </div>
-                    <div className="border-l border-slate-700 pl-4">
-                        <span className="block text-blue-400 font-bold">💳 ${todayStats.digital.toLocaleString()}</span>
-                        <span className="text-slate-500 text-xs">Digital</span>
-                    </div>
+        {/* Total Card */}
+        <div className="bg-slate-900 dark:bg-card dark:border dark:border-border text-white p-8 rounded-3xl shadow-xl relative overflow-hidden group">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-primary rounded-full blur-[60px] opacity-40 group-hover:opacity-60 transition"></div>
+            <p className="text-slate-400 font-bold uppercase tracking-widest text-xs mb-2">Caja Diaria (Real)</p>
+            <p className="text-5xl font-black font-nunito">${stats.total.toLocaleString()}</p>
+            <div className="mt-6 flex gap-6">
+                <div>
+                    <span className="block text-green-400 font-bold text-lg">${stats.cash.toLocaleString()}</span>
+                    <span className="text-slate-500 text-xs font-bold uppercase">Efectivo</span>
+                </div>
+                <div className="w-px bg-slate-700"></div>
+                <div>
+                    <span className="block text-blue-400 font-bold text-lg">${stats.digital.toLocaleString()}</span>
+                    <span className="text-slate-500 text-xs font-bold uppercase">Digital</span>
                 </div>
             </div>
         </div>
 
-        {/* Acumulado Mes */}
-        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-blue-600">
-            <p className="text-gray-500 text-sm font-bold uppercase">Facturación Mes</p>
-            <p className="text-3xl font-bold text-gray-800 mt-2">${monthRevenue.toLocaleString()}</p>
-            <p className="text-xs text-gray-400 mt-1">
-                Ganancia Estimada: <span className="text-green-600 font-bold">${monthProfit.toLocaleString()}</span>
-            </p>
+        {/* Appointments Summary */}
+        <div className="bg-card text-card-foreground p-8 rounded-3xl shadow-sm border border-border flex flex-col justify-between hover:shadow-md transition">
+            <div>
+                <p className="text-muted-foreground font-bold uppercase tracking-widest text-xs mb-2">Turnos Hoy</p>
+                <p className="text-4xl font-black font-nunito">{todayAppointments.length}</p>
+            </div>
+            <div className="mt-4">
+                <div className="flex -space-x-2 overflow-hidden">
+                    {todayAppointments.slice(0, 4).map(appt => (
+                        <div key={appt.id} className="inline-block h-10 w-10 rounded-full ring-2 ring-background bg-primary/20 flex items-center justify-center text-primary font-bold text-xs" title={appt.pet.name}>
+                            {appt.pet.name.slice(0,2)}
+                        </div>
+                    ))}
+                    {todayAppointments.length > 4 && (
+                        <div className="inline-block h-10 w-10 rounded-full ring-2 ring-background bg-secondary flex items-center justify-center text-xs font-bold text-muted-foreground">
+                            +{todayAppointments.length - 4}
+                        </div>
+                    )}
+                </div>
+            </div>
         </div>
 
-        {/* Rentabilidad */}
-        <div className="bg-white p-6 rounded-lg shadow border-l-4 border-purple-600">
-            <p className="text-gray-500 text-sm font-bold uppercase">Margen Promedio</p>
-            <p className="text-3xl font-bold text-gray-800 mt-2">{monthMargin.toFixed(1)}%</p>
-            <p className="text-xs text-gray-400 mt-1">Sobre ventas totales</p>
+        {/* Stock Alert */}
+        <div className="bg-orange-500/10 dark:bg-orange-500/5 p-8 rounded-3xl border border-orange-500/20 flex flex-col justify-between">
+            <div>
+                 <div className="flex justify-between items-start">
+                    <p className="text-orange-600 dark:text-orange-400 font-bold uppercase tracking-widest text-xs mb-2">Atención Requerida</p>
+                    <span className="bg-orange-500/20 text-orange-700 dark:text-orange-300 text-xs font-bold px-2 py-1 rounded-lg">Stock</span>
+                 </div>
+                <p className="text-4xl font-black text-orange-700 dark:text-orange-400 font-nunito">{lowStockVariants.length}</p>
+                <p className="text-orange-600/80 dark:text-orange-400/80 text-sm font-medium mt-1">Productos por agotarse</p>
+            </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {/* AGENDA HOY */}
-        <div className="bg-white rounded-lg shadow border overflow-hidden">
-            <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
-                <h2 className="font-bold text-lg text-gray-800">📅 Agenda de Hoy</h2>
-                <Link href="/agenda" className="text-sm text-blue-600 hover:underline">Ver completa →</Link>
-            </div>
-            {todayAppointments.length === 0 ? (
-                <div className="p-8 text-center text-gray-400">No hay turnos para hoy.</div>
-            ) : (
-                <div className="divide-y">
-                    {todayAppointments.map(appt => {
-                        const time = appt.startTime.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' })
-                        return (
-                            <div key={appt.id} className="p-4 flex items-center justify-between hover:bg-gray-50">
-                                <div className="flex items-center gap-3">
-                                    <span className="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded">{time}</span>
-                                    <div>
-                                        <p className="font-bold text-gray-800">{appt.pet.name}</p>
-                                        <p className="text-xs text-gray-500">{appt.pet.breed} - {appt.pet.ownerName}</p>
-                                    </div>
-                                </div>
-                                <div>
-                                    {appt.status === 'PENDING' && <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-1 rounded">Pendiente</span>}
-                                    {appt.status === 'BILLED' && <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">Cobrado</span>}
-                                    {appt.status === 'COMPLETED' && <span className="text-xs bg-gray-100 text-gray-800 px-2 py-1 rounded">Listo</span>}
-                                </div>
-                            </div>
-                        )
-                    })}
-                </div>
-            )}
+      {/* PESTAÑAS DE DETALLE (Compactación Visual) */}
+      <Tabs defaultValue="agenda" className="w-full">
+        <div className="flex flex-col md:flex-row justify-between items-center gap-4 mb-6">
+            <h3 className="text-xl font-black text-foreground font-nunito">Actividad Detallada</h3>
+            <TabsList>
+                <TabsTrigger value="agenda">📅 Agenda Hoy</TabsTrigger>
+                <TabsTrigger value="stock">⚠️ Alertas Stock</TabsTrigger>
+            </TabsList>
         </div>
 
-        {/* ALERTAS STOCK */}
-        <div className="bg-white rounded-lg shadow border overflow-hidden">
-            <div className="p-4 border-b bg-red-50 flex justify-between items-center">
-                <h2 className="font-bold text-lg text-red-800">⚠️ Alertas de Stock</h2>
-                <Link href="/inventory" className="text-sm text-red-600 hover:underline">Gestionar →</Link>
+        {/* CONTENIDO: AGENDA */}
+        <TabsContent value="agenda">
+            <div className="bg-card text-card-foreground rounded-3xl shadow-sm border border-border p-6 min-h-[300px]">
+                {todayAppointments.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-center p-8 text-muted-foreground">
+                        <span className="text-4xl mb-4 opacity-50">😴</span>
+                        <p className="font-bold">Todo tranquilo por hoy</p>
+                        <p className="text-xs">No hay turnos programados.</p>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {todayAppointments.map(appt => (
+                            <div key={appt.id} className="flex items-center gap-4 p-4 border border-border rounded-2xl hover:bg-accent/50 transition group bg-background">
+                                <div className="bg-primary/10 text-primary font-bold text-sm px-3 py-2 rounded-xl border border-primary/10 min-w-[60px] text-center">
+                                    {appt.startTime.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className="font-bold group-hover:text-primary transition truncate">{appt.pet.name}</p>
+                                    <p className="text-xs text-muted-foreground truncate">{appt.pet.breed} • {appt.pet.ownerName}</p>
+                                </div>
+                                <span className={`px-2 py-1 rounded-lg text-[10px] font-bold uppercase border shrink-0
+                                    ${appt.status === 'PENDING' ? 'bg-yellow-500/10 text-yellow-600 border-yellow-500/20' : ''}
+                                    ${appt.status === 'CONFIRMED' ? 'bg-blue-500/10 text-blue-600 border-blue-500/20' : ''}
+                                    ${appt.status === 'COMPLETED' ? 'bg-green-500/10 text-green-600 border-green-500/20' : ''}
+                                    ${appt.status === 'BILLED' ? 'bg-secondary text-muted-foreground border-border' : ''}
+                                `}>
+                                    {appt.status === 'BILLED' ? 'COBRADO' : appt.status}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+                <div className="mt-6 text-center">
+                    <Link href="/agenda" className="text-primary text-sm font-bold hover:underline">Ir a la Agenda Completa →</Link>
+                </div>
             </div>
-            {lowStockVariants.length === 0 ? (
-                <div className="p-8 text-center text-gray-400">✅ Inventario saludable.</div>
-            ) : (
-                <div className="divide-y">
+        </TabsContent>
+
+        {/* CONTENIDO: STOCK */}
+        <TabsContent value="stock">
+            <div className="bg-card text-card-foreground rounded-3xl shadow-sm border border-border p-6 min-h-[300px]">
+                <div className="space-y-3">
                     {lowStockVariants.map(v => (
-                        <div key={v.id} className="p-4 flex items-center justify-between hover:bg-red-50 transition">
-                            <div className="flex items-center gap-3">
-                                <div className="text-2xl">📦</div>
+                        <div key={v.id} className="flex items-center justify-between p-4 border border-border rounded-2xl hover:bg-destructive/5 transition bg-background">
+                            <div className="flex items-center gap-4">
+                                <div className={`w-2 h-12 rounded-full ${v.stock === 0 ? 'bg-destructive' : 'bg-orange-400'}`}></div>
                                 <div>
-                                    <p className="font-bold text-gray-800">{v.product.name}</p>
-                                    <p className="text-xs text-gray-500">Var: {v.name}</p>
+                                    <p className="font-bold text-base">{v.product.name}</p>
+                                    <p className="text-xs text-muted-foreground">{v.name}</p>
                                 </div>
                             </div>
                             <div className="text-right">
-                                <p className={`text-xl font-bold ${v.stock === 0 ? 'text-red-600' : 'text-orange-500'}`}>{v.stock}</p>
-                                <p className="text-[10px] text-gray-400 uppercase font-bold">Unidades</p>
+                                <p className={`font-black text-xl ${v.stock === 0 ? 'text-destructive' : 'text-orange-500'}`}>
+                                    {v.stock}
+                                </p>
+                                <p className="text-[10px] font-bold text-muted-foreground uppercase">Unid.</p>
                             </div>
                         </div>
                     ))}
+                    {lowStockVariants.length === 0 && (
+                        <div className="h-full flex flex-col items-center justify-center text-center p-8 text-green-600">
+                            <span className="text-4xl mb-4">✅</span>
+                            <p className="font-bold">Inventario Saludable</p>
+                            <p className="text-xs text-green-600/80">No hay alertas de stock bajo.</p>
+                        </div>
+                    )}
                 </div>
-            )}
-        </div>
-      </div>
+                <div className="mt-6 text-center">
+                    <Link href="/inventory" className="text-orange-600 text-sm font-bold hover:underline">Gestionar Inventario →</Link>
+                </div>
+            </div>
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

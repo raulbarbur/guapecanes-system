@@ -1,15 +1,16 @@
-// src/app/layout.tsx
 import type { Metadata } from "next";
-import { Inter } from "next/font/google"; // 👈 Cambiamos Geist por Inter
+import { Inter, Nunito } from "next/font/google";
 import "./globals.css";
 import MainNav from "@/components/MainNav";
+import { Toaster } from "@/components/ui/Toast";
+import { ThemeProvider } from "@/components/ThemeProvider";
 
-// Configuramos la fuente Inter
-const inter = Inter({ subsets: ["latin"] });
+const inter = Inter({ subsets: ["latin"], variable: '--font-inter' });
+const nunito = Nunito({ subsets: ["latin"], variable: '--font-nunito' });
 
 export const metadata: Metadata = {
-  title: "Guapecanes - Sistema de Gestión",
-  description: "Gestión de Peluquería y Consignación",
+  title: "Guapecanes",
+  description: "Gestión v3.0",
 };
 
 export default function RootLayout({
@@ -18,22 +19,26 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="es">
-      {/* Aplicamos la clase de la fuente Inter */}
-      <body className={`${inter.className} antialiased bg-gray-50 min-h-screen`}>
+    <html lang="es" suppressHydrationWarning>
+      <body className={`${inter.variable} ${nunito.variable} antialiased min-h-screen bg-background text-foreground font-sans`}>
         
-        {/* CONTENEDOR PRINCIPAL */}
-        <div className="flex flex-col md:flex-row min-h-screen">
-          
-          {/* 1. Barra de Navegación */}
-          <MainNav />
+        <ThemeProvider
+            attribute="class"
+            defaultTheme="system"
+            enableSystem
+            disableTransitionOnChange
+        >
+            <div className="flex flex-col md:flex-row min-h-screen">
+              <MainNav />
+              {/* Main Content: Usa bg-background por defecto gracias a globals.css */}
+              <main className="flex-1 pb-24 md:pb-0 relative overflow-y-auto h-screen custom-scrollbar bg-background">
+                {children}
+              </main>
+            </div>
+            
+            <Toaster />
+        </ThemeProvider>
 
-          {/* 2. Área de Contenido */}
-          <main className="flex-1 pb-24 md:pb-0 md:px-0">
-            {children}
-          </main>
-
-        </div>
       </body>
     </html>
   );

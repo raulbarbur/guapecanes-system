@@ -1,28 +1,44 @@
-// src/app/products/import/page.tsx
+//export const dynamic = 'force-dynamic'
+
 import ExcelImporter from "@/components/ExcelImporter"
-import ExportButtons from "@/components/ExportButtons" // 👈 Importamos
+import ExportButtons from "@/components/ExportButtons"
 import Link from "next/link"
+import { PageHeader } from "@/components/ui/shared/PageHeader" // Usamos el header estándar
 
 export default function ImportPage() {
   return (
-    <div className="p-8 max-w-4xl mx-auto">
-      <Link href="/products" className="text-blue-600 hover:underline mb-4 block font-bold text-sm">
-        ← Volver a Productos
+    <div className="p-6 md:p-8 max-w-5xl mx-auto space-y-8 animate-in fade-in">
+      
+      {/* Navegación Breadcrumb simple */}
+      <Link 
+        href="/products" 
+        className="text-primary hover:underline text-xs font-bold uppercase tracking-wide flex items-center gap-1"
+      >
+        <span>←</span> Volver a Productos
       </Link>
       
-      <div className="flex flex-col gap-2 mb-8">
-        <h1 className="text-3xl font-bold text-gray-800">Centro de Carga Masiva</h1>
-        <p className="text-gray-500">Administrá tu inventario usando Excel.</p>
+      <PageHeader 
+        title="Centro de Carga Masiva"
+        description="Administrá tu inventario subiendo planillas Excel."
+      />
+
+      {/* SECCIÓN 1: DESCARGAS */}
+      <div className="space-y-4">
+          <h3 className="text-sm font-black text-muted-foreground uppercase tracking-widest">
+            1. Descargar Plantillas
+          </h3>
+          <ExportButtons />
       </div>
 
-      {/* SECCIÓN 1: DESCARGAS (NUEVO) */}
-      <ExportButtons />
+      <hr className="border-border border-dashed" />
 
-      <hr className="my-8 border-gray-200" />
-
-      {/* SECCIÓN 2: IMPORTADOR (EXISTENTE) */}
-      <h2 className="text-xl font-bold mb-4 text-gray-800">Subir Archivo Modificado</h2>
-      <ExcelImporter />
+      {/* SECCIÓN 2: IMPORTADOR */}
+      <div className="space-y-4 h-full">
+         <h3 className="text-sm font-black text-muted-foreground uppercase tracking-widest">
+            2. Subir Modificaciones
+          </h3>
+         <ExcelImporter />
+      </div>
     </div>
   )
 }

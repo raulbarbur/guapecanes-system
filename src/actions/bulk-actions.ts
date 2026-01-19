@@ -2,11 +2,12 @@
 'use server'
 
 import { prisma } from "@/lib/prisma"
+import { getSession } from "@/lib/auth" 
 
-// Definimos la nueva estructura esperada (incluye variantName)
+// Definimos la estructura esperada
 type ImportRow = {
   name: string
-  variantName?: string // 👈 Campo nuevo opcional
+  variantName?: string 
   categoryName: string
   ownerName: string
   cost: number
@@ -21,102 +22,101 @@ function toTitleCase(str: string) {
   )
 }
 
-export async function importSingleProduct(data: ImportRow) {
-  try {
-    // 1. SANITIZACIÓN Y VALIDACIÓN (Fail Fast)
-    if (!data.name || !data.categoryName || !data.ownerName) {
-      return { success: false, error: "Datos incompletos: Faltan Nombre, Categoría o Dueño." }
+/**
+ * Lógica central de procesamiento de UN producto dentro de una transacción.
+ * Se extrae para reutilización y consistencia.
+ * Lanza errores para provocar rollback si algo falla.
+ */
+async function processProductRow(tx: any, data: ImportRow, rowIndex: number) {
+    // 1. SANITIZACIÓN
+    if (typeof data !== 'object' || data === null) {
+        throw new Error(`Fila ${rowIndex}: Datos corruptos o formato inválido.`)
+    }
+
+    const name = String(data.name || "").trim()
+    const categoryName = String(data.categoryName || "").trim()
+    const ownerName = String(data.ownerName || "").trim()
+    
+    if (!name || !categoryName || !ownerName) {
+        throw new Error(`Fila ${rowIndex} (${name}): Faltan datos obligatorios.`)
     }
 
     const cost = Number(data.cost)
     const price = Number(data.price)
 
     if (isNaN(cost) || isNaN(price)) {
-      return { success: false, error: "Formato inválido: Costo y Precio deben ser números." }
+        throw new Error(`Fila ${rowIndex} (${name}): Importes numéricos inválidos.`)
     }
 
-    // 2. REGLAS FINANCIERAS (Guard Clauses)
     if (cost < 0 || price < 0) {
-      return { success: false, error: "Error financiero: Importes negativos no permitidos." }
+        throw new Error(`Fila ${rowIndex} (${name}): No se permiten importes negativos.`)
     }
 
     if (price < cost) {
-      return { success: false, error: `Rentabilidad negativa: Costo ($${cost}) > Venta ($${price}).` }
+        throw new Error(`Fila ${rowIndex} (${name}): Rentabilidad negativa (Precio < Costo).`)
     }
 
-    // 3. NORMALIZAR DATOS
-    const productName = data.name.trim()
-    // Si no ponen variante, asumimos "Estándar"
-    const variantName = data.variantName && data.variantName.trim() !== "" 
-        ? data.variantName.trim() 
+    const variantName = data.variantName && String(data.variantName).trim() !== "" 
+        ? String(data.variantName).trim() 
         : "Estándar"
-    
-    // 4. BUSCAR O CREAR ENTIDADES RELACIONADAS (Dueño y Categoría)
-    
+
+    // 2. DEPENDENCIAS
     // A. Dueño
-    const owner = await prisma.owner.findFirst({
-      where: { name: { equals: data.ownerName, mode: 'insensitive' } }
+    const owner = await tx.owner.findFirst({
+        where: { name: { equals: ownerName, mode: 'insensitive' } }
     })
 
     if (!owner) {
-      return { success: false, error: `Dueño desconocido: "${data.ownerName}". Crealo en el sistema primero.` }
+        throw new Error(`Fila ${rowIndex}: Dueño desconocido "${ownerName}".`)
     }
 
-    // B. Categoría (Upsert manual)
-    const normalizedCategory = toTitleCase(data.categoryName.trim())
-    let category = await prisma.category.findFirst({
-      where: { name: { equals: normalizedCategory, mode: 'insensitive' } }
+    // B. Categoría (Upsert manual dentro de la TX)
+    const normalizedCategory = toTitleCase(categoryName)
+    let category = await tx.category.findFirst({
+        where: { name: { equals: normalizedCategory, mode: 'insensitive' } }
     })
 
     if (!category) {
-      category = await prisma.category.create({
-        data: { name: normalizedCategory } 
-      })
+        category = await tx.category.create({
+            data: { name: normalizedCategory } 
+        })
     }
 
-    // 5. LÓGICA CORE: PADRE E HIJO
-    
-    // Buscamos si el Producto Padre ya existe para este dueño
-    const existingProduct = await prisma.product.findFirst({
+    // 3. PRODUCTO Y VARIANTE
+    const existingProduct = await tx.product.findFirst({
         where: {
-            name: { equals: productName, mode: 'insensitive' },
+            name: { equals: name, mode: 'insensitive' },
             ownerId: owner.id
         }
     })
 
     if (existingProduct) {
-        // CASO A: EL PRODUCTO EXISTE -> Intentamos agregar la VARIANTE
-        
-        // Verificamos si YA existe esa variante específica
-        const existingVariant = await prisma.productVariant.findFirst({
+        // Verificar variante
+        const existingVariant = await tx.productVariant.findFirst({
             where: {
                 productId: existingProduct.id,
                 name: { equals: variantName, mode: 'insensitive' }
             }
         })
 
-        if (existingVariant) {
-            return { success: false, error: `Omitido: Ya existe la variante "${variantName}" en "${productName}".` }
+        if (!existingVariant) {
+            await tx.productVariant.create({
+                data: {
+                    productId: existingProduct.id,
+                    name: variantName,
+                    costPrice: cost,
+                    salePrice: price,
+                    stock: 0,
+                    imageUrl: null
+                }
+            })
         }
-
-        // Crear la variante nueva en el producto existente
-        await prisma.productVariant.create({
-            data: {
-                productId: existingProduct.id,
-                name: variantName,
-                costPrice: cost,
-                salePrice: price,
-                stock: 0, // Siempre nace en 0
-                imageUrl: null
-            }
-        })
-
+        // Si existe, lo omitimos silenciosamente (Idempotencia)
     } else {
-        // CASO B: EL PRODUCTO NO EXISTE -> Creamos PADRE + HIJO
-        
-        await prisma.product.create({
+        // Crear Padre + Hijo
+        await tx.product.create({
             data: {
-                name: productName,
+                name: name,
                 categoryId: category.id,
                 ownerId: owner.id,
                 isActive: true,
@@ -132,11 +132,58 @@ export async function importSingleProduct(data: ImportRow) {
             }
         })
     }
+}
+
+// --- ACTIONS PÚBLICAS ---
+
+export async function importSingleProduct(data: ImportRow) {
+  try {
+    const session = await getSession()
+    if (!session || session.role !== 'ADMIN') {
+        return { success: false, error: "Requiere permisos de Administrador." }
+    }
+
+    // Reutilizamos la lógica envolviéndola en una transacción unitaria
+    await prisma.$transaction(async (tx) => {
+        await processProductRow(tx, data, 1)
+    })
 
     return { success: true }
 
   } catch (error: any) {
-    console.error("Error importando:", error)
-    return { success: false, error: error.message || "Error interno del servidor" }
+    console.error("Error importando single:", error)
+    return { success: false, error: error.message || "Error interno." }
   }
+}
+
+// R-03: Nueva acción para procesamiento por lotes
+export async function importProductBatch(rows: ImportRow[]) {
+    const session = await getSession()
+    if (!session || session.role !== 'ADMIN') {
+        return { success: false, error: "Requiere permisos de Administrador." }
+    }
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+        return { success: false, error: "Lote vacío o inválido." }
+    }
+
+    try {
+        // Ejecutamos todo el lote en una única transacción atómica
+        // Si una fila falla, todo el lote se revierte (All-or-Nothing)
+        await prisma.$transaction(async (tx) => {
+            for (let i = 0; i < rows.length; i++) {
+                // Pasamos i + 1 para que el mensaje de error tenga sentido humano (Fila 1, no Fila 0)
+                await processProductRow(tx, rows[i], i + 1)
+            }
+        }, {
+            timeout: 20000 // Aumentamos timeout a 20s para lotes grandes
+        })
+
+        return { success: true, count: rows.length }
+
+    } catch (error: any) {
+        console.error("Error en batch:", error)
+        // Retornamos el error exacto que lanzó processProductRow
+        return { success: false, error: error.message || "Error procesando el lote." }
+    }
 }

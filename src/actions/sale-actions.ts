@@ -3,6 +3,8 @@
 
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
+import { StockMovementType, PaymentStatus } from "@prisma/client"
+import { getSession } from "@/lib/auth"
 
 type CartItem = {
   type: 'PRODUCT' | 'SERVICE'
@@ -12,22 +14,38 @@ type CartItem = {
   quantity: number
 }
 
-type PaymentMethod = "CASH" | "TRANSFER"
+type PaymentMethodStr = "CASH" | "TRANSFER" | "CHECKING_ACCOUNT"
+
+// R-06: Helper de redondeo para evitar errores de punto flotante
+const round = (num: number) => Math.round(num * 100) / 100
 
 export async function processSale(
     cart: CartItem[], 
     totalEstimado: number, 
-    paymentMethod: PaymentMethod 
+    paymentMethod: PaymentMethodStr,
+    customerId?: string
 ) {
+  // 1. SEGURIDAD
+  const session = await getSession()
+  if (!session) return { error: "Sesión expirada. Iniciá sesión nuevamente." }
+
   if (cart.length === 0) return { error: "El carrito está vacío" }
 
   try {
     let createdSaleId = ""
     let createdDate = new Date()
 
-    // --- 1. PREPARACIÓN FUERA DE LA TRANSACCIÓN ---
-    // Buscamos todos los datos necesarios ANTES de bloquear la base de datos.
-    // Esto ahorra tiempo de red dentro del túnel de la transacción.
+    const paymentStatus: PaymentStatus = paymentMethod === 'CHECKING_ACCOUNT' 
+        ? 'PENDING' 
+        : 'PAID'
+    
+    const paidAt = paymentStatus === 'PAID' ? new Date() : null
+
+    if (paymentStatus === 'PENDING' && !customerId) {
+        return { error: "Para fiar (Cuenta Corriente) debés seleccionar un cliente." }
+    }
+
+    // R-04: Sanitización. Ignoramos precios del cliente para Productos.
     const productIds = cart.filter(i => i.type === 'PRODUCT').map(i => i.id)
     
     const dbVariants = await prisma.productVariant.findMany({
@@ -35,19 +53,23 @@ export async function processSale(
       include: { product: true }
     })
 
-    // --- 2. TRANSACCIÓN CON TIMEOUT EXTENDIDO ---
     await prisma.$transaction(async (tx) => {
       let totalReal = 0
       const saleItemsData = []
+      const stockMovementsData = [] 
       const appointmentIdsToBill: string[] = []
 
       for (const item of cart) {
         if (item.type === 'PRODUCT') {
             const variant = dbVariants.find(v => v.id === item.id)
-            if (!variant) throw new Error(`Producto no encontrado: ${item.description}`)
+            if (!variant) throw new Error(`Producto no encontrado o inactivo: ${item.description}`)
             
-            // ACTUALIZACIÓN ATÓMICA DE STOCK
-            // Seguimos usando updateMany para el check de stock gte cantidad (Concurrency Safe)
+            // R-04: Sanitización de Cantidad
+            if (item.quantity <= 0 || isNaN(item.quantity)) {
+                throw new Error(`Cantidad inválida para producto: ${item.description}`)
+            }
+
+            // VALIDACIÓN DE STOCK
             const updateResult = await tx.productVariant.updateMany({
                 where: { 
                     id: item.id,
@@ -59,54 +81,73 @@ export async function processSale(
             })
 
             if (updateResult.count === 0) {
-                throw new Error(`Stock insuficiente para: ${variant.product.name}`)
+                throw new Error(`Stock insuficiente para: ${variant.product.name}. Refrescá la página.`)
             }
 
-            const subtotal = Number(variant.salePrice) * item.quantity
-            totalReal += subtotal
+            // R-04: Usamos precio de DB
+            const currentPrice = Number(variant.salePrice)
+            
+            // R-06: Redondeo explícito a nivel de línea (SUBTOTAL)
+            // Esto asegura que 3 items de $33.33 den $99.99 exactos y no $99.99000001
+            const subtotal = round(currentPrice * item.quantity)
+            totalReal = round(totalReal + subtotal)
 
             saleItemsData.push({
                 variantId: variant.id,
                 description: variant.product.name,
                 quantity: item.quantity,
-                costAtSale: variant.costPrice,
-                priceAtSale: variant.salePrice
+                costAtSale: variant.costPrice, // Prisma maneja Decimal, le pasamos number/string
+                priceAtSale: currentPrice,
+                settledQuantity: 0
             })
 
-            await tx.stockMovement.create({
-                data: {
-                    variantId: variant.id,
-                    quantity: -item.quantity,
-                    type: "SALE",
-                    reason: "Venta Mostrador",
-                    userId: "sistema"
-                }
+            stockMovementsData.push({
+                variantId: variant.id,
+                quantity: -item.quantity,
+                type: StockMovementType.SALE,
+                reason: paymentStatus === 'PENDING' ? "Venta Cta. Cte." : "Venta Mostrador",
+                userId: session.userId 
             })
         } 
         else if (item.type === 'SERVICE') {
-            const subtotal = item.price * item.quantity
-            totalReal += subtotal
+            // R-04: Validación de precios manuales
+            if (item.price < 0 || isNaN(item.price)) {
+                throw new Error(`Precio de servicio inválido: ${item.description}`)
+            }
+            if (item.quantity <= 0) throw new Error(`Cantidad inválida para servicio.`)
+
+            // R-06: Redondeo para servicios
+            const subtotal = round(item.price * item.quantity)
+            totalReal = round(totalReal + subtotal)
 
             saleItemsData.push({
                 variantId: null,
                 description: item.description,
                 quantity: item.quantity,
                 costAtSale: 0,
-                priceAtSale: item.price
+                priceAtSale: item.price,
+                settledQuantity: 0
             })
 
             appointmentIdsToBill.push(item.id)
         }
       }
 
+      // Registro de Movimientos de Stock
+      if (stockMovementsData.length > 0) {
+          await tx.stockMovement.createMany({ data: stockMovementsData })
+      }
+
+      // Creación de la Venta con TOTAL REAL redondeado
       const sale = await tx.sale.create({
         data: {
           total: totalReal,
           paymentMethod: paymentMethod, 
           status: "COMPLETED",
-          items: {
-            create: saleItemsData
-          }
+          paymentStatus: paymentStatus,
+          paidAt: paidAt,
+          customerId: customerId || null,
+          items: { create: saleItemsData }
         }
       })
       
@@ -119,16 +160,14 @@ export async function processSale(
             data: { status: 'BILLED' }
         })
       }
-    }, {
-      // CONFIGURACIÓN DE TIMEOUT (Solución al error de expiración)
-      maxWait: 10000, // Tiempo máximo para esperar a obtener una conexión (10s)
-      timeout: 20000  // Tiempo máximo de ejecución de la transacción (20s)
-    })
+
+    }, { maxWait: 5000, timeout: 10000 })
 
     revalidatePath("/products")
     revalidatePath("/pos")
-    revalidatePath("/agenda")
     revalidatePath("/dashboard")
+    revalidatePath("/sales")
+    if (customerId) revalidatePath(`/customers/${customerId}`)
     
     return { success: true, saleId: createdSaleId, date: createdDate }
 
@@ -138,7 +177,42 @@ export async function processSale(
   }
 }
 
+export async function markSaleAsPaid(saleId: string) {
+    const session = await getSession()
+    if (!session) return { error: "No autorizado" }
+
+    try {
+        const currentSale = await prisma.sale.findUnique({
+          where: { id: saleId },
+          select: { paymentStatus: true }
+        })
+
+        if (!currentSale) return { error: "Venta no encontrada" }
+        
+        if (currentSale.paymentStatus === 'PAID') {
+          return { success: true, message: "Venta ya estaba cobrada previamente" }
+        }
+
+        await prisma.sale.update({
+            where: { id: saleId },
+            data: {
+                paymentStatus: 'PAID',
+                paidAt: new Date()
+            }
+        })
+
+        revalidatePath("/dashboard")
+        revalidatePath("/sales")
+        return { success: true }
+    } catch (error) {
+        return { error: "Error al actualizar pago" }
+    }
+}
+
 export async function cancelSale(saleId: string) {
+  const session = await getSession()
+  if (!session) return { error: "No autorizado" }
+
   try {
     await prisma.$transaction(async (tx) => {
       const sale = await tx.sale.findUnique({
@@ -147,56 +221,62 @@ export async function cancelSale(saleId: string) {
       })
 
       if (!sale) throw new Error("Venta no encontrada")
-      if (sale.status === 'CANCELLED') throw new Error("Esta venta ya está anulada")
+      if (sale.status === 'CANCELLED') throw new Error("Ya está anulada")
 
       await tx.sale.update({
         where: { id: saleId },
         data: { status: 'CANCELLED' }
       })
 
+      const movementsToCreate = []
+      const adjustmentsToCreate = []
+
       for (const item of sale.items) {
         if (item.variantId && item.variant) {
+          
           await tx.productVariant.update({
             where: { id: item.variantId },
             data: { stock: { increment: item.quantity } }
           })
 
-          await tx.stockMovement.create({
-            data: {
-              variantId: item.variantId,
-              quantity: item.quantity,
-              type: 'SALE_CANCELLED',
-              reason: `Anulación Venta #${sale.id.slice(0, 8)}`,
-              userId: 'sistema'
-            }
+          movementsToCreate.push({
+            variantId: item.variantId,
+            quantity: item.quantity,
+            type: StockMovementType.SALE_CANCELLED,
+            reason: `Anulación Venta #${sale.id.slice(0, 8)}`,
+            userId: session.userId 
           })
 
-          if (item.isSettled) {
-            const amountOwedBack = Number(item.costAtSale) * item.quantity
-            await tx.balanceAdjustment.create({
-              data: {
+          if (item.settledQuantity > 0) {
+            // R-06: Redondeo también en anulaciones
+            const amountOwedBack = round(Number(item.costAtSale) * item.settledQuantity)
+            
+            adjustmentsToCreate.push({
                 ownerId: item.variant.product.ownerId,
-                amount: -amountOwedBack,
+                amount: -amountOwedBack, 
                 description: `Devolución Liq. - Prod: ${item.description}`,
                 isApplied: false
-              }
             })
           }
         }
       }
-    }, {
-      maxWait: 10000,
-      timeout: 20000
+
+      if (movementsToCreate.length > 0) {
+          await tx.stockMovement.createMany({ data: movementsToCreate })
+      }
+      
+      if (adjustmentsToCreate.length > 0) {
+          await tx.balanceAdjustment.createMany({ data: adjustmentsToCreate })
+      }
+
     })
 
     revalidatePath("/sales")
     revalidatePath("/products") 
     revalidatePath("/owners/balance")
-    revalidatePath("/dashboard")
     return { success: true }
 
   } catch (error: any) {
-    console.error("Error anulando venta:", error)
-    return { error: error.message || "Error al anular venta" }
+    return { error: error.message }
   }
 }

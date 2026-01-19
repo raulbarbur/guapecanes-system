@@ -1,7 +1,9 @@
-// src/app/pets/[id]/page.tsx
 import { prisma } from "@/lib/prisma"
 import { createNote, deleteNote } from "@/actions/note-actions"
 import Link from "next/link"
+import { cn } from "@/lib/utils"
+import { SubmitButton } from "@/components/ui/SubmitButton" // << FE-02
+import { InfoCard } from "@/components/ui/InfoCard" // << FE-10
 
 interface Props {
   params: Promise<{ id: string }>
@@ -10,12 +12,11 @@ interface Props {
 export default async function PetDetailPage({ params }: Props) {
   const { id } = await params
 
-  // 1. Buscamos la Mascota con TODO su historial (Turnos y Notas)
   const pet = await prisma.pet.findUnique({
     where: { id },
     include: {
       appointments: {
-        orderBy: { startTime: 'desc' } // Los más recientes primero
+        orderBy: { startTime: 'desc' }
       },
       groomingNotes: {
         orderBy: { createdAt: 'desc' }
@@ -23,37 +24,55 @@ export default async function PetDetailPage({ params }: Props) {
     }
   })
 
-  if (!pet) return <div className="p-10">Mascota no encontrada</div>
+  if (!pet) return <div className="p-10 text-foreground">Mascota no encontrada</div>
+
+  // ✅ FIX: Agregamos 'use server' para que sea una Server Action válida
+  async function createNoteAction(formData: FormData) {
+    'use server'
+    await createNote(formData)
+  }
+
+  // ✅ FIX: Action inline para DELETE también necesita 'use server' si se define aquí
+  async function deleteNoteAction(formData: FormData) {
+      'use server'
+      await deleteNote(formData)
+  }
 
   return (
-    <div className="p-8 max-w-6xl mx-auto">
+    <div className="p-4 md:p-8 max-w-6xl mx-auto space-y-8 animate-in fade-in">
       
       {/* CABECERA DE PERFIL */}
-      <div className="mb-8 flex items-center justify-between">
-        <div>
-            <Link href="/pets" className="text-sm text-blue-600 hover:underline mb-2 block">← Volver al listado</Link>
-            <h1 className="text-4xl font-bold text-gray-800 flex items-center gap-3">
-                {pet.name}
-                <span className="text-lg font-normal bg-gray-100 text-gray-600 px-3 py-1 rounded-full border">
-                    {pet.breed || "Mestizo"}
-                </span>
-            </h1>
-            <div className="mt-2 text-gray-600 flex gap-4 text-sm">
-                <p>👤 Dueño: <strong>{pet.ownerName}</strong></p>
-                <p>📞 Tel: <strong>{pet.ownerPhone}</strong></p>
+      <div className="flex flex-col gap-6">
+        <div className="flex flex-col md:flex-row justify-between items-start gap-4">
+            <div>
+                <Link href="/pets" className="text-xs font-bold text-primary hover:underline mb-2 block">← Volver al listado</Link>
+                <div className="flex items-center gap-3">
+                    <h1 className="text-3xl md:text-4xl font-black text-foreground font-nunito">{pet.name}</h1>
+                    <span className="text-sm font-bold bg-secondary text-secondary-foreground px-3 py-1 rounded-xl border border-border">
+                        {pet.breed || "Mestizo"}
+                    </span>
+                </div>
             </div>
-            {pet.notes && (
-                <p className="mt-3 text-red-600 bg-red-50 p-2 rounded border border-red-100 inline-block text-sm font-bold">
-                    ⚠️ Alerta: {pet.notes}
-                </p>
-            )}
+            
+            <div className="bg-card text-card-foreground px-5 py-3 rounded-2xl border border-border shadow-sm min-w-[150px] text-center">
+                <p className="text-[10px] uppercase font-bold text-muted-foreground mb-1">Visitas Totales</p>
+                <p className="text-3xl font-black font-nunito">{pet.appointments.length}</p>
+            </div>
         </div>
-        
-        <div className="text-right">
-             <div className="bg-slate-800 text-white px-6 py-4 rounded-lg text-center">
-                <p className="text-xs uppercase opacity-70">Turnos Totales</p>
-                <p className="text-3xl font-bold">{pet.appointments.length}</p>
-             </div>
+
+        {/* INFO CONTACTO (Compacto) */}
+        <div className="flex flex-wrap gap-3">
+            <InfoCard icon="👤" label="Dueño" value={pet.ownerName} />
+            <InfoCard icon="📞" label="Contacto" value={pet.ownerPhone} />
+            {pet.notes && (
+                 <div className="flex items-center gap-3 p-3 bg-destructive/5 border border-destructive/20 rounded-xl shadow-sm min-w-[200px] flex-1">
+                    <div className="w-10 h-10 flex items-center justify-center bg-destructive/10 text-destructive text-lg rounded-full shrink-0">⚠️</div>
+                    <div>
+                        <p className="text-[10px] font-bold text-destructive uppercase tracking-wider">Alerta Médica</p>
+                        <p className="font-bold text-sm text-foreground">{pet.notes}</p>
+                    </div>
+                </div>
+            )}
         </div>
       </div>
 
@@ -63,49 +82,54 @@ export default async function PetDetailPage({ params }: Props) {
         <div className="lg:col-span-2 space-y-8">
             
             {/* Formulario Agregar Nota */}
-            <div className="bg-yellow-50 p-6 rounded-lg border border-yellow-200">
-                <h2 className="font-bold text-yellow-800 mb-2 flex items-center gap-2">
+            <div className="bg-yellow-500/5 p-6 rounded-3xl border border-yellow-500/20">
+                <h2 className="font-bold text-yellow-700 dark:text-yellow-400 mb-4 flex items-center gap-2">
                     📝 Nueva Nota Técnica
                 </h2>
-                <form action={createNote}>
+                
+                <form action={createNoteAction}>
                     <input type="hidden" name="petId" value={pet.id} />
                     <textarea 
                         name="content" 
                         required
                         rows={3} 
-                        className="w-full p-3 border rounded bg-white focus:ring-2 focus:ring-yellow-400 outline-none"
-                        placeholder="Ej: Corte con alza 4, se portó bien, usar shampoo hipoalergénico..."
+                        className="w-full p-4 border border-yellow-500/20 rounded-xl bg-background text-foreground focus:ring-2 focus:ring-yellow-500 outline-none placeholder:text-muted-foreground resize-none"
+                        placeholder="Ej: Corte con alza 4, se portó bien..."
                     ></textarea>
-                    <div className="mt-2 text-right">
-                        <button className="bg-yellow-600 text-white px-4 py-2 rounded font-bold hover:bg-yellow-700">
+                    <div className="mt-3 text-right">
+                        <SubmitButton className="bg-yellow-600 hover:bg-yellow-700 text-white border-none">
                             Guardar Nota
-                        </button>
+                        </SubmitButton>
                     </div>
                 </form>
             </div>
 
             {/* Listado de Notas */}
             <div>
-                <h3 className="text-xl font-bold mb-4 text-gray-800">Historial Técnico</h3>
+                <h3 className="text-xl font-black mb-4 text-foreground font-nunito">Historial Técnico</h3>
                 {pet.groomingNotes.length === 0 ? (
-                    <p className="text-gray-400 italic">No hay notas guardadas.</p>
+                    <div className="p-8 text-center text-muted-foreground border border-dashed rounded-2xl opacity-60">
+                        No hay notas guardadas aún.
+                    </div>
                 ) : (
                     <div className="space-y-4">
                         {pet.groomingNotes.map(note => (
-                            <div key={note.id} className="bg-white p-4 rounded shadow-sm border border-l-4 border-l-yellow-400 group">
+                            <div key={note.id} className="bg-card p-5 rounded-2xl shadow-sm border border-border group relative hover:border-primary/30 transition">
                                 <div className="flex justify-between items-start">
-                                    <p className="text-gray-800 whitespace-pre-wrap">{note.content}</p>
-                                    <form action={deleteNote}>
+                                    <p className="text-foreground whitespace-pre-wrap text-sm leading-relaxed">{note.content}</p>
+                                </div>
+                                <div className="mt-3 pt-3 border-t border-border flex justify-between items-center">
+                                    <p className="text-xs text-muted-foreground font-bold">
+                                        {note.createdAt.toLocaleDateString()} • {note.createdAt.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                    </p>
+                                    <form action={deleteNoteAction}>
                                         <input type="hidden" name="id" value={note.id} />
                                         <input type="hidden" name="petId" value={pet.id} />
-                                        <button className="text-gray-300 hover:text-red-500 text-xs opacity-0 group-hover:opacity-100 transition">
-                                            Borrar
+                                        <button className="text-destructive hover:underline text-[10px] font-bold opacity-0 group-hover:opacity-100 transition px-2 py-1">
+                                            BORRAR
                                         </button>
                                     </form>
                                 </div>
-                                <p className="text-xs text-gray-400 mt-2 text-right">
-                                    {note.createdAt.toLocaleDateString()} a las {note.createdAt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
-                                </p>
                             </div>
                         ))}
                     </div>
@@ -115,30 +139,31 @@ export default async function PetDetailPage({ params }: Props) {
 
         {/* COLUMNA DERECHA: HISTORIAL DE TURNOS */}
         <div className="lg:col-span-1">
-            <h3 className="text-xl font-bold mb-4 text-gray-800">Historial de Visitas</h3>
-            <div className="bg-white rounded-lg shadow border overflow-hidden">
+            <h3 className="text-xl font-black mb-4 text-foreground font-nunito">Historial de Visitas</h3>
+            <div className="bg-card rounded-3xl shadow-sm border border-border overflow-hidden flex flex-col max-h-[600px]">
                 {pet.appointments.length === 0 ? (
-                    <div className="p-8 text-center text-gray-400">Sin visitas aún.</div>
+                    <div className="p-8 text-center text-muted-foreground text-sm">Sin visitas aún.</div>
                 ) : (
-                    <div className="divide-y">
+                    <div className="overflow-y-auto custom-scrollbar divide-y divide-border">
                         {pet.appointments.map(appt => (
-                            <div key={appt.id} className="p-4 hover:bg-gray-50">
+                            <div key={appt.id} className="p-4 hover:bg-muted/30 transition">
                                 <div className="flex justify-between items-center mb-1">
-                                    <span className="font-bold text-gray-700">
+                                    <span className="font-bold text-foreground text-sm">
                                         {appt.startTime.toLocaleDateString()}
                                     </span>
-                                    <span className={`text-[10px] px-2 py-0.5 rounded font-bold border 
-                                        ${appt.status === 'COMPLETED' || appt.status === 'BILLED' 
-                                            ? 'bg-green-100 text-green-700 border-green-200' 
+                                    <span className={cn(
+                                        "text-[9px] px-2 py-0.5 rounded font-black border uppercase",
+                                        appt.status === 'COMPLETED' || appt.status === 'BILLED' 
+                                            ? 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20' 
                                             : appt.status === 'CANCELLED' 
-                                                ? 'bg-red-50 text-red-500 border-red-100'
-                                                : 'bg-blue-50 text-blue-600 border-blue-100'}
-                                    `}>
+                                                ? 'bg-destructive/10 text-destructive border-destructive/20'
+                                                : 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20'
+                                    )}>
                                         {appt.status === 'BILLED' ? 'COBRADO' : appt.status}
                                     </span>
                                 </div>
-                                <p className="text-sm text-gray-500">
-                                    Hora: {appt.startTime.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
+                                <p className="text-xs text-muted-foreground font-mono">
+                                    {appt.startTime.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
                                 </p>
                             </div>
                         ))}
