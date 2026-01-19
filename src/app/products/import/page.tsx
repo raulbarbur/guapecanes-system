@@ -1,4 +1,4 @@
-export const dynamic = 'force-dynamic'
+//export const dynamic = 'force-dynamic'
 
 import ExcelImporter from "@/components/ExcelImporter"
 import ExportButtons from "@/components/ExportButtons"

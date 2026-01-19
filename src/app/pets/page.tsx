@@ -1,5 +1,5 @@
 // src/app/pets/page.tsx
-export const dynamic = 'force-dynamic'
+//export const dynamic = 'force-dynamic'
 
 import { prisma } from "@/lib/prisma"
 import { createPet, deletePet } from "@/actions/pet-actions"

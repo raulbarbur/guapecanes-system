@@ -1,5 +1,5 @@
 // src/app/products/[id]/page.tsx
-export const dynamic = 'force-dynamic'
+//export const dynamic = 'force-dynamic'
 
 import { prisma } from "@/lib/prisma"
 import { translateMovementType } from "@/services/inventory-service"

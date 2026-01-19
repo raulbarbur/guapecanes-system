@@ -2,7 +2,7 @@
 
 // 👇 CAMBIO REALIZADO AQUÍ 👇
 // Forzar el renderizado dinámico para evitar el conflicto con el middleware durante el build.
-export const dynamic = 'force-dynamic'
+//export const dynamic = 'force-dynamic'
 
 import { createCategory } from '@/actions/category-actions';
 import { prisma } from '@/lib/prisma';
