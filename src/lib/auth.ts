@@ -25,7 +25,7 @@ export async function createSession(userId: string, role: string, name: string) 
 
   const isProduction = process.env.NODE_ENV === "production";
   
-  // SOLUCIÓN: Agregamos 'await' antes de cookies()
+  // Usamos await cookies() para compatibilidad
   const cookieStore = await cookies();
 
   cookieStore.set("session", token, {
@@ -36,9 +36,8 @@ export async function createSession(userId: string, role: string, name: string) 
   });
 }
 
-// 4. Verificar Sesión
-export async function verifySession() {
-  // SOLUCIÓN: Agregamos 'await' antes de cookies()
+// 4. Obtener Sesión (Antes llamada verifySession, ahora getSession para compatibilidad)
+export async function getSession() {
   const cookieStore = await cookies();
   const cookie = cookieStore.get("session")?.value;
   
@@ -56,7 +55,6 @@ export async function verifySession() {
 
 // 5. Cerrar Sesión
 export async function deleteSession() {
-  // SOLUCIÓN: Agregamos 'await' antes de cookies()
   const cookieStore = await cookies();
   cookieStore.delete("session");
 }
