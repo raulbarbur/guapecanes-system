@@ -1,16 +1,17 @@
 // src/app/categories/page.tsx
 
+// 👇 CAMBIO REALIZADO AQUÍ 👇
+// Forzar el renderizado dinámico para evitar el conflicto con el middleware durante el build.
+export const dynamic = 'force-dynamic'
+
 import { createCategory } from '@/actions/category-actions';
-import { prisma } from '@/lib/prisma'; // << 1. IMPORTAR PRISMA
+import { prisma } from '@/lib/prisma';
 import { AppCard } from '@/components/ui/shared/AppCard';
 import { PageHeader } from '@/components/ui/shared/PageHeader';
 import { SubmitButton } from '@/components/ui/SubmitButton';
 import { revalidatePath } from 'next/cache';
 
 export default async function CategoriesPage() {
-  // << 2. LEER DATOS DIRECTAMENTE DESDE LA BASE DE DATOS >>
-  // Esto reemplaza la llamada a getCategories() que no existía.
-  // Prisma nos da el tipado correcto automáticamente, solucionando el error 'any'.
   const categories = await prisma.category.findMany({
     orderBy: {
       name: 'asc'
@@ -71,7 +72,6 @@ export default async function CategoriesPage() {
                   </td>
                 </tr>
               ) : (
-                // El error de 'any' se soluciona aquí porque 'categories' ahora tiene un tipo claro.
                 categories.map((category) => (
                   <tr key={category.id}>
                     <td className="p-4 pl-6 font-medium">{category.name}</td>
