@@ -22,13 +22,8 @@ export function Pagination({ totalPages, currentPage }: PaginationProps) {
     const params = new URLSearchParams(searchParams.toString())
     params.set('page', String(pageNumber))
     
-    const newUrl = `${pathname}?${params.toString()}`
-
-    // 1. Actualizar la URL en la barra de direcciones.
-    router.push(newUrl)
-    
-    // 2. << LÍNEA CRÍTICA >> Forzar el refresco de los datos del Server Component.
-    router.refresh()
+    // Este comando ahora funcionará correctamente para navegar y refrescar los datos.
+    router.push(`${pathname}?${params.toString()}`)
   }
 
   const isFirstPage = currentPage === 1

@@ -1,57 +1,47 @@
-// src/components/PosSystem.tsx
 'use client'
 
+import { useRef, useState } from "react"
 import Image from "next/image"
-import { useState, useRef } from "react" // << 1. IMPORTAR useRef
-import TicketView from "./TicketView"
-import { usePos, ProductGroupType, CustomerOption } from "@/hooks/usePos"
+import { useVirtualizer } from '@tanstack/react-virtual'
+
+import { PosProvider, usePosContext } from "@/context/PosContext"
+import { ProductGroupType, CustomerOption } from "@/hooks/usePos"
 import { cn } from "@/lib/utils"
-import { createCustomer } from "@/actions/customer-actions"
-import { useToast } from "@/components/ui/Toast"
-import { useVirtualizer } from '@tanstack/react-virtual' // << 2. IMPORTAR EL HOOK DE VIRTUALIZACIÓN
 
-export default function PosSystem({ products, customers }: { products: ProductGroupType[], customers: CustomerOption[] }) {
+// ----------------------------------------------------------------------
+// 🔗 IMPORTACIONES BLINDADAS
+// ----------------------------------------------------------------------
+// Default import (asumiendo que TicketView usa export default)
+import TicketView from "./TicketView"
+
+// Named imports (coinciden con los archivos de arriba)
+import { VariantSelectionModal } from "./VariantSelectionModal"
+import { CustomerCreationModal } from "./CustomerCreationModal"
+
+
+// ----------------------------------------------------------------------
+// UI INTERNA
+// ----------------------------------------------------------------------
+function PosSystemContent({ customers }: { customers: CustomerOption[] }) {
   const {
-    cart, total, loading, paymentMethod, lastSale,
-    search, selectedCategory, categories, filteredProducts, selectedProductForModal, selectedCustomerId,
-    setPaymentMethod, setSearch, setSelectedCategory, setSelectedProductForModal, clearLastSale, setSelectedCustomerId,
-    handleProductClick, addVariantToCart, removeFromCart, updateServicePrice, checkout
-  } = usePos(products, customers)
-
-  const { addToast } = useToast()
-  
-  const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false)
-  const [creatingCustomer, setCreatingCustomer] = useState(false)
+    loading, search, selectedCategory, categories, filteredProducts,
+    cart, total, paymentMethod, lastSale, selectedCustomerId,
+    setPaymentMethod, setSearch, setSelectedCategory, clearLastSale, 
+    setSelectedCustomerId, handleProductClick, removeFromCart, updateServicePrice, checkout
+  } = usePosContext()
 
   const showImages = process.env.NEXT_PUBLIC_ENABLE_IMAGES === 'true'
+  const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false)
 
-  // << 3. CREAR LA REFERENCIA PARA EL CONTENEDOR CON SCROLL >>
   const parentRef = useRef<HTMLDivElement>(null)
-
-  // << 4. CONFIGURAR EL VIRTUALIZADOR >>
   const rowVirtualizer = useVirtualizer({
     count: filteredProducts.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 180, // Altura estimada de cada tarjeta de producto, ajústala si es necesario.
-    overscan: 5, // Renderiza 5 items extra fuera de la vista para un scroll más suave.
+    estimateSize: () => 180, 
+    overscan: 5,
   })
 
-  const handleQuickCustomerCreate = async (formData: FormData) => {
-    setCreatingCustomer(true)
-    const result = await createCustomer(formData) 
-    setCreatingCustomer(false)
-
-    if (result?.success) {
-        addToast("✅ Cliente creado y seleccionado.", "success")
-        setIsCustomerModalOpen(false)
-        if (result.customer) {
-            setSelectedCustomerId(result.customer.id)
-        }
-    } else {
-        addToast(result?.error || "Error al crear cliente", "error")
-    }
-  }
-
+  // VISTA: ÉXITO
   if (lastSale) {
     if (lastSale.method === 'CHECKING_ACCOUNT') {
         return (
@@ -72,7 +62,6 @@ export default function PosSystem({ products, customers }: { products: ProductGr
             </div>
         )
     }
-
     return (
         <TicketView 
             mode="POS"
@@ -86,10 +75,12 @@ export default function PosSystem({ products, customers }: { products: ProductGr
     )
   }
 
+  // VISTA: PRINCIPAL
   return (
     <>
     <div className="flex flex-col md:flex-row h-[calc(100vh-80px)] md:h-[calc(100vh-20px)] gap-6 pb-4 md:pb-0">
       
+      {/* IZQUIERDA: LISTA */}
       <div className="flex-1 flex flex-col gap-6 overflow-hidden h-full">
         <div className="bg-card p-4 rounded-3xl shadow-sm border border-border space-y-3 shrink-0">
             <div className="relative">
@@ -129,7 +120,6 @@ export default function PosSystem({ products, customers }: { products: ProductGr
             </div>
         </div>
 
-        {/* << 5. ASIGNAR LA REFERENCIA AL CONTENEDOR CON SCROLL >> */}
         <div ref={parentRef} className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
             {filteredProducts.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-64 text-muted-foreground opacity-60">
@@ -143,7 +133,6 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                     </button>
                 </div>
             ) : (
-                // << 6. REEMPLAZAR EL DIV DE LA GRILLA POR UN DIV CON ALTURA VIRTUAL >>
                 <div
                   style={{
                     height: `${rowVirtualizer.getTotalSize()}px`,
@@ -151,10 +140,9 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                     position: 'relative',
                   }}
                 >
-                  {/* << 7. REEMPLAZAR EL .map() DIRECTO POR EL DEL VIRTUALIZADOR >> */}
                   {rowVirtualizer.getVirtualItems().map((virtualItem) => {
-                    const p = filteredProducts[virtualItem.index] // Obtener el producto actual
-                    if (!p) return null // Guardia de seguridad
+                    const p = filteredProducts[virtualItem.index]
+                    if (!p) return null
 
                     const isOOS = p.totalStock === 0
                     const stockColor = isOOS ? 'bg-zinc-500' : p.totalStock <= 3 ? 'bg-orange-500' : 'bg-green-500'
@@ -169,10 +157,9 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                           width: '100%',
                           height: `${virtualItem.size}px`,
                           transform: `translateY(${virtualItem.start}px)`,
-                          padding: '8px 0' // Espaciado vertical entre items
+                          padding: '8px 0'
                         }}
                       >
-                        {/* El botón y su contenido interno no cambian, solo se renderiza condicionalmente */}
                         <button 
                             onClick={() => handleProductClick(p)}
                             disabled={isOOS}
@@ -242,7 +229,7 @@ export default function PosSystem({ products, customers }: { products: ProductGr
         </div>
       </div>
 
-      {/* La columna 2 (Ticket/Carrito) y los modales no sufren ningún cambio. */}
+      {/* DERECHA: TICKET */}
       <div className="w-full md:w-[380px] shrink-0 h-full flex flex-col">
         <div className="bg-card border border-border rounded-3xl shadow-xl flex flex-col h-full overflow-hidden relative">
           
@@ -404,111 +391,23 @@ export default function PosSystem({ products, customers }: { products: ProductGr
       </div>
     </div>
 
-    {selectedProductForModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-            <div className="bg-card rounded-3xl shadow-2xl w-full max-w-md overflow-hidden border border-border">
-                <div className="p-5 border-b border-border flex justify-between items-center bg-muted/30">
-                    <div>
-                        <h3 className="font-black text-lg text-foreground font-nunito">{selectedProductForModal.name}</h3>
-                        <p className="text-xs text-muted-foreground font-bold uppercase">Seleccioná variante</p>
-                    </div>
-                    <button 
-                        onClick={() => setSelectedProductForModal(null)} 
-                        className="w-8 h-8 rounded-full bg-border flex items-center justify-center text-muted-foreground hover:bg-input transition"
-                    >
-                        ✕
-                    </button>
-                </div>
-                
-                <div className="p-4 max-h-[60vh] overflow-y-auto custom-scrollbar grid grid-cols-2 gap-3">
-                    {selectedProductForModal.variants.map(variant => {
-                        const hasStock = variant.stock > 0
-                        return (
-                            <button
-                                key={variant.id}
-                                disabled={!hasStock}
-                                onClick={() => {
-                                    addVariantToCart(selectedProductForModal.name, variant)
-                                    setSelectedProductForModal(null)
-                                }}
-                                className={cn(
-                                    "p-4 border rounded-2xl text-left transition flex flex-col justify-between h-24 relative overflow-hidden",
-                                    hasStock 
-                                        ? 'bg-background border-border hover:border-primary hover:ring-1 hover:ring-primary/50' 
-                                        : 'bg-muted border-transparent opacity-50 cursor-not-allowed'
-                                )}
-                            >
-                                <div className="z-10 relative">
-                                    <span className="font-bold text-foreground block text-sm mb-1">{variant.name}</span>
-                                    {hasStock ? (
-                                        <span className="text-primary font-black text-lg">${variant.price}</span>
-                                    ) : (
-                                        <span className="text-xs font-bold text-destructive uppercase bg-destructive/10 px-2 py-0.5 rounded">Agotado</span>
-                                    )}
-                                </div>
-
-                                {hasStock && (
-                                    <div className="absolute bottom-2 right-2 text-[10px] font-bold bg-green-500/20 text-green-700 dark:text-green-400 px-2 py-1 rounded-full">
-                                        {variant.stock} u.
-                                    </div>
-                                )}
-                            </button>
-                        )
-                    })}
-                </div>
-            </div>
-        </div>
-    )}
-
-    {isCustomerModalOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-             <div className="bg-card rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden border border-border animate-in zoom-in-95">
-                <div className="p-5 border-b border-border flex justify-between items-center bg-muted/30">
-                    <h3 className="font-black text-lg text-foreground font-nunito">👤 Nuevo Cliente</h3>
-                    <button 
-                        onClick={() => setIsCustomerModalOpen(false)} 
-                        className="w-8 h-8 rounded-full bg-border flex items-center justify-center text-muted-foreground hover:bg-input transition"
-                    >
-                        ✕
-                    </button>
-                </div>
-                
-                <form action={handleQuickCustomerCreate} className="p-6 flex flex-col gap-4">
-                    <div className="space-y-1">
-                        <label className="text-xs font-bold text-muted-foreground uppercase">Nombre Completo *</label>
-                        <input 
-                            name="name" 
-                            type="text" 
-                            required 
-                            autoFocus
-                            placeholder="Ej: Juan Perez"
-                            className="w-full bg-background border border-input p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-primary"
-                        />
-                    </div>
-                    <div className="space-y-1">
-                        <label className="text-xs font-bold text-muted-foreground uppercase">Teléfono</label>
-                        <input 
-                            name="phone" 
-                            type="text" 
-                            placeholder="Opcional"
-                            className="w-full bg-background border border-input p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-primary"
-                        />
-                    </div>
-
-                    <button 
-                        type="submit" 
-                        disabled={creatingCustomer}
-                        className={cn(
-                            "w-full py-3 rounded-xl font-bold text-primary-foreground transition mt-2",
-                            creatingCustomer ? 'bg-muted text-muted-foreground' : 'bg-primary hover:bg-primary/90'
-                        )}
-                    >
-                        {creatingCustomer ? "Guardando..." : "Crear Cliente"}
-                    </button>
-                </form>
-             </div>
-        </div>
-    )}
+    {/* MODALES */}
+    <VariantSelectionModal />
+    
+    <CustomerCreationModal 
+        isOpen={isCustomerModalOpen}
+        onClose={() => setIsCustomerModalOpen(false)}
+        onCustomerCreated={setSelectedCustomerId}
+    />
     </>
+  )
+}
+
+// WRAPPER PRINCIPAL
+export default function PosSystem({ products, customers }: { products: ProductGroupType[], customers: CustomerOption[] }) {
+  return (
+    <PosProvider products={products} customers={customers}>
+       <PosSystemContent customers={customers} />
+    </PosProvider>
   )
 }

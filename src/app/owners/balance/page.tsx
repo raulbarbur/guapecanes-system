@@ -1,9 +1,9 @@
 // src/app/owners/balance/page.tsx
 export const dynamic = 'force-dynamic'
 
-import { prisma } from "@/lib/prisma";
-import Link from "next/link";
-import { cn } from "@/lib/utils";
+import { prisma } from "@/lib/prisma"
+import Link from "next/link"
+import { cn, formatCurrency } from "@/lib/utils" // << IMPORTAR NUEVO HELPER
 
 export default async function OwnersBalancePage() {
   const ownersData = await prisma.owner.findMany({
@@ -17,7 +17,7 @@ export default async function OwnersBalancePage() {
                 where: { 
                     sale: { 
                         status: 'COMPLETED',
-                        paymentStatus: 'PAID' // 👈 FILTRO
+                        paymentStatus: 'PAID' 
                     } 
                 }
               },
@@ -27,30 +27,30 @@ export default async function OwnersBalancePage() {
       },
       balanceAdjustments: { where: { isApplied: false } }
     },
-  });
+  })
 
   const report = ownersData.map((owner) => {
-    let debtFromSales = 0;
-    let debtFromAdjustments = 0;
-    let itemsCount = 0;
+    let debtFromSales = 0
+    let debtFromAdjustments = 0
+    let itemsCount = 0
 
     owner.products.forEach((product) => {
       product.variants.forEach((variant) => {
         variant.saleItems.forEach((item) => {
-          const remainingQty = item.quantity - item.settledQuantity;
+          const remainingQty = item.quantity - item.settledQuantity
           if (remainingQty > 0) {
-            debtFromSales += Number(item.costAtSale) * remainingQty;
-            itemsCount += remainingQty;
+            debtFromSales += Number(item.costAtSale) * remainingQty
+            itemsCount += remainingQty
           }
-        });
-      });
-    });
+        })
+      })
+    })
 
     owner.balanceAdjustments.forEach(adjustment => {
-      debtFromAdjustments += Number(adjustment.amount);
-    });
+      debtFromAdjustments += Number(adjustment.amount)
+    })
 
-    const totalDebt = debtFromSales + debtFromAdjustments;
+    const totalDebt = debtFromSales + debtFromAdjustments
 
     return {
       ownerId: owner.id,
@@ -59,18 +59,18 @@ export default async function OwnersBalancePage() {
       totalDebt,
       itemsCount,
       hasAdjustments: owner.balanceAdjustments.length > 0
-    };
-  });
+    }
+  })
 
   const ownersWithActivity = report
     .filter((r) => r.totalDebt !== 0)
-    .sort((a, b) => b.totalDebt - a.totalDebt);
+    .sort((a, b) => b.totalDebt - a.totalDebt)
 
-  const ownersClean = report.filter((r) => r.totalDebt === 0);
-  const totalGlobal = report.reduce((sum, r) => sum + r.totalDebt, 0);
+  const ownersClean = report.filter((r) => r.totalDebt === 0)
+  const totalGlobal = report.reduce((sum, r) => sum + r.totalDebt, 0)
 
   return (
-    <div className="p-6 md:p-8 max-w-6xl mx-auto space-y-8 animate-in fade-in">
+    <div className="p-4 md:p-8 max-w-6xl mx-auto space-y-6 md:space-y-8 animate-in fade-in">
       
       {/* HEADER + KPI */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
@@ -79,14 +79,60 @@ export default async function OwnersBalancePage() {
             <p className="text-sm text-muted-foreground mt-1">Saldos pendientes a dueños y proveedores.</p>
         </div>
         
-        <div className="bg-foreground text-background px-6 py-4 rounded-2xl shadow-xl border border-border">
+        <div className="bg-foreground text-background px-6 py-4 rounded-2xl shadow-xl border border-border w-full md:w-auto">
             <p className="text-[10px] uppercase font-bold tracking-widest opacity-80 mb-1">Deuda Total Local</p>
-            <p className="text-3xl font-black font-nunito tracking-tight">${totalGlobal.toLocaleString()}</p>
+            <p className="text-3xl font-black font-nunito tracking-tight">{formatCurrency(totalGlobal)}</p>
         </div>
       </div>
 
-      {/* TABLA DE DEUDAS */}
-      <div className="bg-card rounded-3xl shadow-sm overflow-hidden border border-border">
+      {/* --- VISTA MÓVIL (CARDS) --- */}
+      <div className="md:hidden space-y-4">
+        {ownersWithActivity.length === 0 && (
+          <div className="p-8 text-center text-muted-foreground bg-muted/20 rounded-2xl">
+            <span className="text-4xl block mb-2 opacity-50">🎉</span>
+            ¡Todo al día!
+          </div>
+        )}
+        
+        {ownersWithActivity.map((row) => (
+          <div key={row.ownerId} className="bg-card p-5 rounded-2xl shadow-sm border border-border flex flex-col gap-4">
+             <div className="flex justify-between items-start">
+                <div>
+                   <h3 className="font-bold text-lg text-foreground">{row.name}</h3>
+                   <p className="text-xs text-muted-foreground">{row.phone || "Sin teléfono"}</p>
+                   {row.hasAdjustments && (
+                        <span className="text-[10px] bg-yellow-500/10 text-yellow-600 px-2 py-0.5 rounded border border-yellow-500/20 inline-block mt-1 font-bold">
+                        ⚠️ Ajustes
+                        </span>
+                    )}
+                </div>
+                <div className="text-right">
+                    <p className={cn(
+                        "text-xl font-black",
+                        row.totalDebt >= 0 
+                            ? 'text-destructive dark:text-red-400' 
+                            : 'text-green-600 dark:text-green-400'
+                    )}>
+                        {formatCurrency(row.totalDebt)}
+                    </p>
+                    <span className="text-[10px] font-bold bg-secondary px-2 py-0.5 rounded text-muted-foreground">
+                        {row.itemsCount} items
+                    </span>
+                </div>
+             </div>
+             
+             <Link
+                href={`/owners/settlement/${row.ownerId}`}
+                className="w-full bg-primary/10 text-primary py-3 rounded-xl text-center text-sm font-bold active:scale-95 transition"
+             >
+                Ver Detalle
+             </Link>
+          </div>
+        ))}
+      </div>
+
+      {/* --- VISTA DESKTOP (TABLA) --- */}
+      <div className="hidden md:block bg-card rounded-3xl shadow-sm overflow-hidden border border-border">
         <div className="overflow-x-auto">
             <table className="w-full text-left">
             <thead className="bg-muted/50 text-muted-foreground uppercase text-xs font-bold">
@@ -125,7 +171,7 @@ export default async function OwnersBalancePage() {
                                 ? 'text-destructive dark:text-red-400' 
                                 : 'text-green-600 dark:text-green-400'
                         )}>
-                            ${row.totalDebt.toLocaleString()}
+                            {formatCurrency(row.totalDebt)}
                         </span>
                         {row.totalDebt < 0 && (
                             <p className="text-[10px] text-green-600 dark:text-green-400 font-bold uppercase mt-1">Saldo a favor Local</p>
@@ -154,11 +200,11 @@ export default async function OwnersBalancePage() {
         )}
       </div>
 
-      {/* DUEÑOS AL DÍA */}
+      {/* DUEÑOS AL DÍA (Común para ambos) */}
       {ownersClean.length > 0 && (
         <div className="bg-card/50 p-6 rounded-3xl border border-border border-dashed">
             <details className="group">
-                <summary className="cursor-pointer text-muted-foreground font-bold hover:text-foreground select-none flex items-center gap-2">
+                <summary className="cursor-pointer text-muted-foreground font-bold hover:text-foreground select-none flex items-center gap-2 outline-none">
                     <span>Ver dueños sin saldo pendiente ({ownersClean.length})</span>
                     <span className="transition-transform group-open:rotate-180">▼</span>
                 </summary>
@@ -168,8 +214,8 @@ export default async function OwnersBalancePage() {
                         key={o.ownerId}
                         className="p-3 rounded-xl bg-background border border-border text-sm flex justify-between items-center opacity-70 hover:opacity-100 transition"
                     >
-                        <span className="font-medium">{o.name}</span>
-                        <span className="text-green-500 font-bold">✓</span>
+                        <span className="font-medium truncate">{o.name}</span>
+                        <span className="text-green-500 font-bold shrink-0">✓</span>
                     </div>
                     ))}
                 </div>
@@ -177,5 +223,5 @@ export default async function OwnersBalancePage() {
         </div>
       )}
     </div>
-  );
+  )
 }

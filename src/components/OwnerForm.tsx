@@ -5,6 +5,8 @@ import { createOwner, updateOwner } from "@/actions/owner-actions"
 import { useRouter } from "next/navigation"
 import { useState } from "react"
 import { cn } from "@/lib/utils"
+import { useToast } from "@/components/ui/Toast"
+import { CollapsibleSection } from "@/components/ui/CollapsibleSection"
 
 type OwnerData = {
   id?: string
@@ -16,6 +18,7 @@ type OwnerData = {
 export default function OwnerForm({ initialData }: { initialData?: OwnerData }) {
   const [loading, setLoading] = useState(false)
   const router = useRouter()
+  const { addToast } = useToast()
 
   const handleSubmit = async (formData: FormData) => {
     setLoading(true)
@@ -26,12 +29,14 @@ export default function OwnerForm({ initialData }: { initialData?: OwnerData }) 
         formData.append("id", initialData.id)
         result = await updateOwner(formData)
         if (result.success) {
+            addToast("Dueño actualizado", "success")
             router.push("/owners") 
             router.refresh()
         }
     } else {
         result = await createOwner(formData)
         if (result?.success) {
+            addToast("Dueño creado", "success")
             const form = document.getElementById("owner-form") as HTMLFormElement
             form?.reset()
             router.refresh()
@@ -39,7 +44,7 @@ export default function OwnerForm({ initialData }: { initialData?: OwnerData }) 
     }
 
     setLoading(false)
-    if (result?.error) alert(result.error)
+    if (result?.error) addToast(result.error, "error")
   }
 
   const inputClass = "w-full p-3 rounded-xl border border-input bg-background text-foreground text-sm focus:ring-2 focus:ring-primary outline-none transition"
@@ -66,17 +71,6 @@ export default function OwnerForm({ initialData }: { initialData?: OwnerData }) 
         </div>
 
         <div>
-          <label className={labelClass}>Email</label>
-          <input 
-            name="email" 
-            defaultValue={initialData?.email || ""}
-            type="email" 
-            className={inputClass} 
-            placeholder="juan@mail.com"
-          />
-        </div>
-
-        <div>
           <label className={labelClass}>Teléfono / WhatsApp</label>
           <input 
             name="phone" 
@@ -86,6 +80,19 @@ export default function OwnerForm({ initialData }: { initialData?: OwnerData }) 
             placeholder="11 1234 5678"
           />
         </div>
+
+        <CollapsibleSection title="Información Extra" icon="📧">
+            <div className="pt-2">
+                <label className={labelClass}>Email</label>
+                <input 
+                    name="email" 
+                    defaultValue={initialData?.email || ""}
+                    type="email" 
+                    className={inputClass} 
+                    placeholder="juan@mail.com"
+                />
+            </div>
+        </CollapsibleSection>
 
         <button 
           type="submit" 

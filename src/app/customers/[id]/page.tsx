@@ -1,15 +1,10 @@
-// src/app/customers/[id]/page.tsx
-
-// 👇 CAMBIO REALIZADO AQUÍ 👇
-// Forzar el renderizado dinámico para evitar el conflicto con el middleware durante el build.
-//export const dynamic = 'force-dynamic'
-
 import { prisma } from "@/lib/prisma"
 import Link from "next/link"
 import { notFound } from "next/navigation"
 import { cn } from "@/lib/utils"
 import CustomerForm from "@/components/CustomerForm"
 import CustomerSaleRow from "@/components/CustomerSaleRow"
+import { InfoCard } from "@/components/ui/InfoCard" // << IMPORTAR
 
 interface Props {
   params: Promise<{ id: string }>
@@ -33,22 +28,20 @@ export default async function CustomerDetailPage({ params }: Props) {
 
   if (!customer) return notFound()
 
-  // FIX: Serialización de Decimales a Number/String para evitar errores de Client Component
-  // Transformamos el objeto customer y sus relaciones profundamente
+  // Serialización segura
   const serializedCustomer = {
       ...customer,
       sales: customer.sales.map(sale => ({
           ...sale,
-          total: Number(sale.total), // Decimal -> Number
+          total: Number(sale.total),
           items: sale.items.map(item => ({
               ...item,
-              priceAtSale: Number(item.priceAtSale), // Decimal -> Number
-              costAtSale: Number(item.costAtSale)    // Decimal -> Number
+              priceAtSale: Number(item.priceAtSale),
+              costAtSale: Number(item.costAtSale)
           }))
       }))
   }
 
-  // Cálculos usando los datos serializados
   const totalDebt = serializedCustomer.sales
     .filter(s => s.paymentStatus === 'PENDING')
     .reduce((sum, s) => sum + s.total, 0)
@@ -57,72 +50,64 @@ export default async function CustomerDetailPage({ params }: Props) {
     .reduce((sum, s) => sum + s.total, 0)
 
   return (
-    <div className="p-6 md:p-8 max-w-6xl mx-auto space-y-8 animate-in fade-in">
+    <div className="p-4 md:p-8 max-w-6xl mx-auto space-y-6 md:space-y-8 animate-in fade-in">
       
-      {/* HEADER */}
-      <div className="flex flex-col md:flex-row justify-between items-start gap-6">
-        <div>
-            <Link href="/customers" className="text-xs font-bold text-primary hover:underline mb-2 block">← Volver al listado</Link>
-            <h1 className="text-4xl font-black text-foreground font-nunito">{customer.name}</h1>
-            <div className="mt-2 text-muted-foreground flex gap-4 text-sm font-medium">
-                {customer.phone && <span>📞 {customer.phone}</span>}
-                {customer.email && <span>📧 {customer.email}</span>}
+      {/* HEADER REFACTORIZADO CON INFOCARDS */}
+      <div className="flex flex-col gap-6">
+        <div className="flex justify-between items-start">
+            <div>
+                <Link href="/customers" className="text-xs font-bold text-primary hover:underline mb-2 block">← Volver al listado</Link>
+                <h1 className="text-3xl md:text-4xl font-black text-foreground font-nunito">{customer.name}</h1>
             </div>
-            {customer.address && <p className="text-sm text-muted-foreground mt-1">📍 {customer.address}</p>}
+            
+            {/* TARJETA DE DEUDA (Compacta) */}
+            <div className={cn(
+                "px-4 py-2 rounded-xl border flex flex-col items-end",
+                totalDebt > 0 
+                    ? 'bg-destructive/10 border-destructive/20 text-destructive' 
+                    : 'bg-green-500/10 border-green-500/20 text-green-600 dark:text-green-400'
+            )}>
+                <p className="text-[10px] font-bold uppercase opacity-80">Saldo</p>
+                <p className="text-2xl font-black tracking-tight">${totalDebt.toLocaleString()}</p>
+            </div>
         </div>
 
-        {/* TARJETA DE DEUDA */}
-        <div className={cn(
-            "p-6 rounded-3xl shadow-lg border min-w-[280px]",
-            totalDebt > 0 
-                ? 'bg-destructive text-destructive-foreground border-destructive/50' 
-                : 'bg-card text-foreground border-border'
-        )}>
-            <p className="text-xs font-bold uppercase opacity-80 mb-1">
-                {totalDebt > 0 ? "Deuda Pendiente" : "Estado de Cuenta"}
-            </p>
-            <p className="text-4xl font-black tracking-tight mb-2">
-                ${totalDebt.toLocaleString()}
-            </p>
-            {totalDebt === 0 ? (
-                <div className="inline-block bg-green-500/20 text-green-600 dark:text-green-400 px-3 py-1 rounded-lg text-xs font-bold">
-                    ✅ AL DÍA
+        {/* GRILLA DE CONTACTO */}
+        <div className="flex flex-wrap gap-3">
+            <InfoCard icon="📞" label="Teléfono" value={customer.phone} />
+            <InfoCard icon="📧" label="Email" value={customer.email} />
+            <InfoCard icon="📍" label="Dirección" value={customer.address} className="md:min-w-[200px]" />
+            <div className="ml-auto hidden md:block">
+                 <div className="bg-blue-500/5 px-4 py-2 rounded-xl border border-blue-500/10 text-right">
+                    <p className="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase">LTV (Total Gastado)</p>
+                    <p className="text-lg font-black text-blue-700 dark:text-blue-300">
+                        ${lifetimeValue.toLocaleString()}
+                    </p>
                 </div>
-            ) : (
-                <p className="text-xs opacity-90">El cliente debe abonar este monto.</p>
-            )}
+            </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         
-        {/* COLUMNA IZQUIERDA: EDICIÓN + ESTADÍSTICAS */}
-        <div className="lg:col-span-1 space-y-6">
-            <div className="bg-blue-500/5 p-6 rounded-3xl border border-blue-500/10">
-                <p className="text-xs font-bold text-blue-600 dark:text-blue-400 uppercase mb-1">Compras Totales</p>
-                <p className="text-2xl font-black text-blue-700 dark:text-blue-300">
-                    ${lifetimeValue.toLocaleString()}
-                </p>
-                <p className="text-xs text-muted-foreground mt-1">{customer.sales.length} operaciones registradas</p>
-            </div>
-
-            {/* Pasamos el objeto limpio sin Decimals */}
+        {/* COLUMNA IZQUIERDA: FORMULARIO */}
+        <div className="lg:col-span-1">
             <CustomerForm initialData={serializedCustomer} />
         </div>
 
         {/* COLUMNA DERECHA: HISTORIAL */}
-        <div className="lg:col-span-2">
-            <h2 className="text-xl font-bold text-foreground mb-4 flex items-center gap-2">
-                📜 Historial de Cuenta
+        <div className="lg:col-span-2 space-y-4">
+            <h2 className="text-lg font-bold text-foreground flex items-center gap-2">
+                📜 Historial ({serializedCustomer.sales.length})
             </h2>
             
-            <div className="bg-card rounded-3xl shadow-sm border border-border overflow-hidden">
-                <div className="overflow-x-auto">
-                    <table className="w-full text-left text-sm">
-                        <thead className="bg-muted/50 text-muted-foreground uppercase font-bold text-xs">
+            <div className="bg-card rounded-3xl shadow-sm border border-border overflow-hidden flex flex-col max-h-[600px]">
+                <div className="overflow-y-auto custom-scrollbar flex-1">
+                    <table className="w-full text-left text-sm relative">
+                        <thead className="bg-muted/50 text-muted-foreground uppercase font-bold text-xs sticky top-0 z-10">
                             <tr>
                                 <th className="p-4 pl-6">Fecha</th>
-                                <th className="p-4">Resumen Compra</th>
+                                <th className="p-4">Resumen</th>
                                 <th className="p-4 text-right">Monto</th>
                                 <th className="p-4 text-center">Estado</th>
                                 <th className="p-4 text-right pr-6">Acción</th>
