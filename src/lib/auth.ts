@@ -13,12 +13,18 @@ interface SessionPayload extends JWTPayload {
   name: string;
 }
 
-// 2. Verificar Contraseña
+// 2. Hashing de Contraseña (NUEVA FUNCIÓN AGREGADA)
+export async function hashPassword(password: string) {
+  // El "10" es el salt rounds, estándar de seguridad
+  return await bcrypt.hash(password, 10);
+}
+
+// 3. Verificar Contraseña
 export async function verifyPassword(plainPassword: string, hashedPassword: string) {
   return await bcrypt.compare(plainPassword, hashedPassword);
 }
 
-// 3. Crear Sesión (Cookie)
+// 4. Crear Sesión (Cookie)
 export async function createSession(userId: string, role: string, name: string) {
   if (!secretKey) throw new Error("JWT_SECRET no definida");
 
@@ -42,7 +48,7 @@ export async function createSession(userId: string, role: string, name: string) 
   });
 }
 
-// 4. Obtener Sesión (Tipada correctamente)
+// 5. Obtener Sesión (Tipada correctamente)
 export async function getSession(): Promise<SessionPayload | null> {
   const cookieStore = await cookies();
   const cookie = cookieStore.get("session")?.value;
@@ -54,7 +60,6 @@ export async function getSession(): Promise<SessionPayload | null> {
       algorithms: ["HS256"],
     });
     
-    // Forzamos a TypeScript a entender que esto tiene userId, role, etc.
     return payload as unknown as SessionPayload;
     
   } catch (error) {
@@ -62,7 +67,7 @@ export async function getSession(): Promise<SessionPayload | null> {
   }
 }
 
-// 5. Cerrar Sesión
+// 6. Cerrar Sesión
 export async function deleteSession() {
   const cookieStore = await cookies();
   cookieStore.delete("session");
