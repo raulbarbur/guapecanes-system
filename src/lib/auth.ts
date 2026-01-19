@@ -1,10 +1,17 @@
-import { SignJWT, jwtVerify } from "jose";
+import { SignJWT, jwtVerify, JWTPayload } from "jose";
 import { cookies } from "next/headers";
 import bcrypt from "bcryptjs";
 
 // 1. Obtener la clave secreta
 const secretKey = process.env.JWT_SECRET;
 const key = new TextEncoder().encode(secretKey);
+
+// Definimos la estructura exacta de nuestra sesión
+interface SessionPayload extends JWTPayload {
+  userId: string;
+  role: string;
+  name: string;
+}
 
 // 2. Verificar Contraseña
 export async function verifyPassword(plainPassword: string, hashedPassword: string) {
@@ -15,7 +22,7 @@ export async function verifyPassword(plainPassword: string, hashedPassword: stri
 export async function createSession(userId: string, role: string, name: string) {
   if (!secretKey) throw new Error("JWT_SECRET no definida");
 
-  const payload = { userId, role, name };
+  const payload: SessionPayload = { userId, role, name };
 
   const token = await new SignJWT(payload)
     .setProtectedHeader({ alg: "HS256" })
@@ -25,7 +32,6 @@ export async function createSession(userId: string, role: string, name: string) 
 
   const isProduction = process.env.NODE_ENV === "production";
   
-  // Usamos await cookies() para compatibilidad
   const cookieStore = await cookies();
 
   cookieStore.set("session", token, {
@@ -36,8 +42,8 @@ export async function createSession(userId: string, role: string, name: string) 
   });
 }
 
-// 4. Obtener Sesión (Antes llamada verifySession, ahora getSession para compatibilidad)
-export async function getSession() {
+// 4. Obtener Sesión (Tipada correctamente)
+export async function getSession(): Promise<SessionPayload | null> {
   const cookieStore = await cookies();
   const cookie = cookieStore.get("session")?.value;
   
@@ -47,7 +53,10 @@ export async function getSession() {
     const { payload } = await jwtVerify(cookie, key, {
       algorithms: ["HS256"],
     });
-    return payload;
+    
+    // Forzamos a TypeScript a entender que esto tiene userId, role, etc.
+    return payload as unknown as SessionPayload;
+    
   } catch (error) {
     return null;
   }
