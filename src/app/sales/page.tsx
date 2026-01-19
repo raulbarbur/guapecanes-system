@@ -7,7 +7,16 @@ import { PageHeader } from "@/components/ui/shared/PageHeader"
 import { AppCard } from "@/components/ui/shared/AppCard"
 import { cn } from "@/lib/utils"
 // Se omite la importación de Pagination.tsx intencionadamente.
-import { Prisma } from "@prisma/client"
+import { Prisma, Sale, SaleItem } from "@prisma/client" // << 1. IMPORTAR TIPOS DE PRISMA
+
+// ==================================================================
+// INICIO: DEFINICIÓN DE TIPOS EXPLÍCITOS
+// ==================================================================
+// Creamos un tipo que representa una "Venta completa con sus ítems"
+type FullSale = Sale & {
+  items: SaleItem[];
+}
+// ==================================================================
 
 interface Props {
   searchParams: { 
@@ -21,20 +30,17 @@ interface Props {
 const SALES_PER_PAGE = 20
 
 export default async function SalesHistoryPage({ searchParams }: Props) {
-  // ==================================================================
-  // INICIO: LOG DE DIAGNÓSTICO EN EL SERVIDOR
-  // ==================================================================
   console.log("--- RENDERIZANDO PÁGINA DE VENTAS EN EL SERVIDOR ---")
   console.log(`Timestamp: ${new Date().toISOString()}`)
   console.log("SEARCH PARAMS RECIBIDOS:", searchParams)
-  // ==================================================================
   
   const { dateFrom, dateTo, method } = searchParams
   const currentPage = Number(searchParams.page) || 1
 
   const isFilteredByDate = dateFrom || dateTo
   
-  let sales = []
+  // << 2. APLICAR EL TIPO EXPLÍCITO A LA VARIABLE 'sales' >>
+  let sales: FullSale[] = []
   let totalSalesCount = 0
   let totalPeriodo = 0
   let cantVentas = 0
@@ -92,9 +98,6 @@ export default async function SalesHistoryPage({ searchParams }: Props) {
   return (
     <div className="p-4 md:p-8 max-w-6xl mx-auto space-y-6 md:space-y-8 animate-in fade-in">
       
-      {/* =============================================================== */}
-      {/* INICIO: CUADRO DE PRUEBA DE DIAGNÓSTICO VISUAL                  */}
-      {/* =============================================================== */}
       <div className="bg-yellow-100 dark:bg-yellow-900/30 border-2 border-yellow-500 text-yellow-900 dark:text-yellow-200 p-4 rounded-lg shadow-md">
         <h2 className="font-black text-lg">PANEL DE DIAGNÓSTICO</h2>
         <p className="text-sm mt-1">
@@ -106,9 +109,6 @@ export default async function SalesHistoryPage({ searchParams }: Props) {
           <Link href="/sales?page=3" className="font-bold underline hover:text-yellow-700 dark:hover:text-yellow-100 transition">Test: Ir a Página 3</Link>
         </div>
       </div>
-      {/* =============================================================== */}
-      {/* FIN: CUADRO DE PRUEBA                                           */}
-      {/* =============================================================== */}
 
       <PageHeader 
         title="Historial de Ventas"
@@ -181,6 +181,7 @@ export default async function SalesHistoryPage({ searchParams }: Props) {
                         const saleForClient = {
                             ...sale,
                             total: Number(sale.total),
+                            // El error de 'i' se soluciona aquí porque TypeScript ahora sabe que 'sale.items' es de tipo 'SaleItem[]'
                             items: sale.items.map(i => ({ ...i, priceAtSale: Number(i.priceAtSale), costAtSale: i.costAtSale ? Number(i.costAtSale) : 0 }))
                         }
                         return <SaleRow key={sale.id} sale={saleForClient} />
@@ -189,7 +190,6 @@ export default async function SalesHistoryPage({ searchParams }: Props) {
             </tbody>
             </table>
         </div>
-        {/* Aquí iría el componente de paginación, pero está deshabilitado para la prueba */}
       </AppCard>
     </div>
   )
