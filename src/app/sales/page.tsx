@@ -1,8 +1,4 @@
 // src/app/sales/page.tsx
-
-
-export const dynamic = 'force-dynamic'
-
 import { prisma } from "@/lib/prisma"
 import { getLocalDateISO, getArgentinaDayRange } from "@/lib/utils"
 import Link from "next/link"
@@ -10,17 +6,12 @@ import SaleRow from "@/components/SaleRow"
 import { PageHeader } from "@/components/ui/shared/PageHeader"
 import { AppCard } from "@/components/ui/shared/AppCard"
 import { cn } from "@/lib/utils"
-// Se omite la importación de Pagination.tsx intencionadamente.
-import { Prisma, Sale, SaleItem } from "@prisma/client" // << 1. IMPORTAR TIPOS DE PRISMA
+import { Pagination } from "@/components/ui/Pagination" // << 1. IMPORTAR PAGINACIÓN
+import { Prisma, Sale, SaleItem } from "@prisma/client"
 
-// ==================================================================
-// INICIO: DEFINICIÓN DE TIPOS EXPLÍCITOS
-// ==================================================================
-// Creamos un tipo que representa una "Venta completa con sus ítems"
 type FullSale = Sale & {
   items: SaleItem[];
 }
-// ==================================================================
 
 interface Props {
   searchParams: { 
@@ -34,16 +25,11 @@ interface Props {
 const SALES_PER_PAGE = 20
 
 export default async function SalesHistoryPage({ searchParams }: Props) {
-  console.log("--- RENDERIZANDO PÁGINA DE VENTAS EN EL SERVIDOR ---")
-  console.log(`Timestamp: ${new Date().toISOString()}`)
-  console.log("SEARCH PARAMS RECIBIDOS:", searchParams)
-  
   const { dateFrom, dateTo, method } = searchParams
   const currentPage = Number(searchParams.page) || 1
 
   const isFilteredByDate = dateFrom || dateTo
   
-  // << 2. APLICAR EL TIPO EXPLÍCITO A LA VARIABLE 'sales' >>
   let sales: FullSale[] = []
   let totalSalesCount = 0
   let totalPeriodo = 0
@@ -69,23 +55,18 @@ export default async function SalesHistoryPage({ searchParams }: Props) {
     })
     totalSalesCount = sales.length
   } else {
-    try {
-      const [count, paginatedSales] = await prisma.$transaction([
-        prisma.sale.count({ where: whereClause }),
-        prisma.sale.findMany({
-          where: whereClause,
-          include: { items: true },
-          orderBy: { createdAt: 'desc' },
-          take: SALES_PER_PAGE,
-          skip: (currentPage - 1) * SALES_PER_PAGE
-        })
-      ])
-      totalSalesCount = count
-      sales = paginatedSales
-      console.log(`Datos de la página ${currentPage} cargados correctamente.`)
-    } catch (error) {
-      console.error("Error al obtener datos paginados:", error)
-    }
+    const [count, paginatedSales] = await prisma.$transaction([
+      prisma.sale.count({ where: whereClause }),
+      prisma.sale.findMany({
+        where: whereClause,
+        include: { items: true },
+        orderBy: { createdAt: 'desc' },
+        take: SALES_PER_PAGE,
+        skip: (currentPage - 1) * SALES_PER_PAGE
+      })
+    ])
+    totalSalesCount = count
+    sales = paginatedSales
   }
   
   const totalPages = Math.ceil(totalSalesCount / SALES_PER_PAGE)
@@ -101,22 +82,9 @@ export default async function SalesHistoryPage({ searchParams }: Props) {
 
   return (
     <div className="p-4 md:p-8 max-w-6xl mx-auto space-y-6 md:space-y-8 animate-in fade-in">
-      
-      <div className="bg-yellow-100 dark:bg-yellow-900/30 border-2 border-yellow-500 text-yellow-900 dark:text-yellow-200 p-4 rounded-lg shadow-md">
-        <h2 className="font-black text-lg">PANEL DE DIAGNÓSTICO</h2>
-        <p className="text-sm mt-1">
-          La página fue renderizada en el servidor con el parámetro de página: <strong className="text-xl font-mono bg-yellow-200 dark:bg-yellow-800/50 px-2 py-1 rounded">{currentPage}</strong>
-        </p>
-        <div className="mt-3 flex flex-wrap gap-4">
-          <Link href="/sales?page=1" className="font-bold underline hover:text-yellow-700 dark:hover:text-yellow-100 transition">Test: Ir a Página 1</Link>
-          <Link href="/sales?page=2" className="font-bold underline hover:text-yellow-700 dark:hover:text-yellow-100 transition">Test: Ir a Página 2</Link>
-          <Link href="/sales?page=3" className="font-bold underline hover:text-yellow-700 dark:hover:text-yellow-100 transition">Test: Ir a Página 3</Link>
-        </div>
-      </div>
-
       <PageHeader 
         title="Historial de Ventas"
-        description={isFilteredByDate ? "Auditoría de caja y transacciones por período." : "Explorador del historial completo de ventas."}
+        description={isFilteredByDate ? "Auditoría de caja por período." : "Explorador del historial completo de ventas."}
       >
         {isFilteredByDate && (
           <div className="bg-primary text-primary-foreground px-6 py-3 rounded-2xl shadow-lg shadow-primary/20 text-right border border-primary/20 min-w-[200px]">
@@ -185,7 +153,6 @@ export default async function SalesHistoryPage({ searchParams }: Props) {
                         const saleForClient = {
                             ...sale,
                             total: Number(sale.total),
-                            // El error de 'i' se soluciona aquí porque TypeScript ahora sabe que 'sale.items' es de tipo 'SaleItem[]'
                             items: sale.items.map(i => ({ ...i, priceAtSale: Number(i.priceAtSale), costAtSale: i.costAtSale ? Number(i.costAtSale) : 0 }))
                         }
                         return <SaleRow key={sale.id} sale={saleForClient} />
@@ -194,6 +161,8 @@ export default async function SalesHistoryPage({ searchParams }: Props) {
             </tbody>
             </table>
         </div>
+        {/* << 2. RENDERIZAR EL COMPONENTE DE PAGINACIÓN >> */}
+        <Pagination currentPage={currentPage} totalPages={totalPages} />
       </AppCard>
     </div>
   )
