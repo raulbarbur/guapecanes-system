@@ -1,3 +1,10 @@
+// src/app/admin/users/page.tsx
+
+// 👇 CAMBIO REALIZADO AQUÍ 👇
+// Forzar el renderizado dinámico para que se ejecute en tiempo de solicitud,
+// no durante el build. Esto evita el conflicto con el middleware de autenticación.
+export const dynamic = 'force-dynamic'
+
 import { prisma } from "@/lib/prisma"
 import UserForm from "@/components/UserForm"
 import { deleteUser } from "@/actions/user-actions"
