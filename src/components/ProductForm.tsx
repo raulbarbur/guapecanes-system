@@ -7,6 +7,7 @@ import dynamic from 'next/dynamic'
 import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
 import { useToast } from "@/components/ui/Toast"
+import { SubmitButton } from "@/components/ui/SubmitButton" // << 1. IMPORTAR
 
 const ImageUpload = dynamic(() => import('./ImageUpload'), {
   loading: () => <p className="text-xs text-muted-foreground animate-pulse">Cargando módulo de imágenes...</p>,
@@ -39,7 +40,7 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
   const router = useRouter()
   const { addToast } = useToast()
   const [imageUrl, setImageUrl] = useState(initialData?.imageUrl || "")
-  const [loading, setLoading] = useState(false)
+  // const [loading, setLoading] = useState(false) // << 2. ELIMINAR ESTADO MANUAL
   const [isNewCategory, setIsNewCategory] = useState(false)
   const [variants, setVariants] = useState<VariantItem[]>(
     initialData?.variants || [{ name: "Estándar", costPrice: 0, salePrice: 0 }]
@@ -71,6 +72,8 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
     setVariants(newList)
   }
 
+  // El 'action' del form llama a esta función, que a su vez llama a la Server Action.
+  // useFormStatus detectará el estado pendiente de esta cadena de llamadas.
   const handleSubmit = async (formData: FormData) => {
     if (variants.some(v => !v.name.trim())) {
         addToast("Todas las variantes deben tener un nombre.", "error")
@@ -81,7 +84,7 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
         return
     }
 
-    setLoading(true)
+    // setLoading(true) // << 3. ELIMINAR
     if (imageUrl) formData.append("imageUrl", imageUrl)
     if (isNewCategory) formData.append("isNewCategory", "true")
     formData.append("variantsJson", JSON.stringify(variants))
@@ -91,7 +94,6 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
         const result = await updateProduct(formData)
         
         if (result && 'error' in result) {
-            // Corrección Final: Añadir fallback por si result.error es undefined o null
             addToast(result.error || "Error al actualizar el producto.", "error")
         } else {
             addToast("Producto actualizado con éxito.", "success")
@@ -102,14 +104,13 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
         const result = await createProduct(formData)
 
         if (result && 'error' in result) {
-            // Corrección Final: Añadir fallback por si result.error es undefined o null
             addToast(result.error || "Error al crear el producto.", "error")
         } else {
             addToast("Producto creado con éxito.", "success")
             router.refresh()
         }
     }
-    setLoading(false)
+    // setLoading(false) // << 4. ELIMINAR
   }
 
   const inputClass = "w-full border border-input bg-background p-2 rounded-lg text-sm focus:ring-2 focus:ring-ring outline-none transition"
@@ -123,6 +124,7 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
       
       <form action={handleSubmit} className="space-y-8">
         
+        {/* ... (resto del formulario sin cambios) ... */}
         <div className="grid grid-cols-1 gap-6">
             <div className="space-y-4">
                 <div><label className={labelClass}>Nombre del Producto *</label><input name="name" defaultValue={initialData?.name} type="text" required placeholder="Ej: Collar de Cuero" className={inputClass} /></div>
@@ -167,9 +169,11 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
 
         <div className="flex flex-col md:flex-row items-center gap-6 pt-4 border-t border-border">
             {showImages && (<div className="w-full md:w-1/2"><ImageUpload onImageUpload={(url) => setImageUrl(url)} /></div>)}
-            <button type="submit" disabled={loading} className={cn("w-full md:w-auto md:ml-auto px-8 py-3 rounded-xl font-bold text-white shadow-lg transition active:scale-95", loading ? 'bg-muted text-muted-foreground cursor-wait' : 'bg-green-600 hover:bg-green-700')}>
-                {loading ? "Guardando..." : "GUARDAR PRODUCTO"}
-            </button>
+            
+            {/* << 5. REEMPLAZAR BOTÓN ANTIGUO POR EL NUEVO COMPONENTE >> */}
+            <SubmitButton loadingText="Guardando..." className="w-full md:w-auto md:ml-auto">
+                GUARDAR PRODUCTO
+            </SubmitButton>
         </div>
       </form>
     </div>
