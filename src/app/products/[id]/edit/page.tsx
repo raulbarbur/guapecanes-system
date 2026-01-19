@@ -1,4 +1,6 @@
 // src/app/products/[id]/edit/page.tsx
+export const dynamic = 'force-dynamic'
+
 import { prisma } from "@/lib/prisma"
 import ProductForm from "@/components/ProductForm"
 import Link from "next/link"

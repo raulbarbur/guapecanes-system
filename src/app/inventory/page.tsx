@@ -1,4 +1,6 @@
 // src/app/inventory/page.tsx
+export const dynamic = 'force-dynamic'
+
 import { prisma } from "@/lib/prisma"
 import StockMovementForm from "@/components/StockMovementForm"
 import InventoryImporter from "@/components/InventoryImporter"

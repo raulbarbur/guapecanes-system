@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic'
+
 import ExcelImporter from "@/components/ExcelImporter"
 import ExportButtons from "@/components/ExportButtons"
 import Link from "next/link"

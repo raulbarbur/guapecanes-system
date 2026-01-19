@@ -1,4 +1,7 @@
 // src/app/sales/page.tsx
+
+export const dynamic = 'force-dynamic'
+
 import { prisma } from "@/lib/prisma"
 import { getLocalDateISO, getArgentinaDayRange } from "@/lib/utils"
 import Link from "next/link"

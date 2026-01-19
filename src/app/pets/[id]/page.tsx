@@ -1,4 +1,6 @@
 // src/app/pets/[id]/page.tsx
+export const dynamic = 'force-dynamic'
+
 import { prisma } from "@/lib/prisma"
 import { createNote, deleteNote } from "@/actions/note-actions"
 import Link from "next/link"
