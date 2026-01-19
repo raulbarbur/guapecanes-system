@@ -1,3 +1,9 @@
+// src/app/customers/[id]/page.tsx
+
+// 👇 CAMBIO REALIZADO AQUÍ 👇
+// Forzar el renderizado dinámico para evitar el conflicto con el middleware durante el build.
+export const dynamic = 'force-dynamic'
+
 import { prisma } from "@/lib/prisma"
 import Link from "next/link"
 import { notFound } from "next/navigation"
