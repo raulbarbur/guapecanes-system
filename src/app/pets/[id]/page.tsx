@@ -25,6 +25,12 @@ export default async function PetDetailPage({ params }: Props) {
 
   if (!pet) return <div className="p-10 text-foreground">Mascota no encontrada</div>
 
+  // Wrapper action para satisfacer el tipado del formulario
+  async function createNoteAction(formData: FormData) {
+    // No se necesita `use server` aquí porque la acción importada ya lo tiene
+    await createNote(formData)
+  }
+
   return (
     <div className="p-6 md:p-8 max-w-6xl mx-auto space-y-8 animate-in fade-in">
       
@@ -65,7 +71,8 @@ export default async function PetDetailPage({ params }: Props) {
                 <h2 className="font-bold text-yellow-700 dark:text-yellow-400 mb-4 flex items-center gap-2">
                     📝 Nueva Nota Técnica
                 </h2>
-                <form action={createNote}>
+                {/* 👇 CAMBIO REALIZADO AQUÍ 👇 */}
+                <form action={createNoteAction}>
                     <input type="hidden" name="petId" value={pet.id} />
                     <textarea 
                         name="content" 
