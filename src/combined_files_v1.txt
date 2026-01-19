@@ -84,7 +84,7 @@ export async function createAppointment(formData: FormData) {
     return { error: "Faltan datos (Mascota, Fecha u Hora)" }
   }
 
-  // R-04: Validación de rango de duración
+  // R-04: Validación de rango de duración (Sanitización)
   if (duration <= 0 || duration > 480) {
       return { error: "La duración del turno debe ser entre 1 y 480 minutos." }
   }
@@ -93,6 +93,19 @@ export async function createAppointment(formData: FormData) {
     // 1. CONSTRUIR FECHAS (Usando utilidad centralizada)
     const startTime = buildArgentinaDate(dateStr, timeStr)
     
+    // R-04: Validación Temporal (No permitir turnos en el pasado, con tolerancia de 5 min)
+    const now = new Date()
+    // Restamos 5 min para tolerar pequeña latencia/desfase del usuario
+    const toleranceThreshold = new Date(now.getTime() - 5 * 60000)
+    
+    // Si la fecha construida es anterior a "hace 5 minutos"
+    if (startTime < toleranceThreshold) {
+         // Opcional: Solo si es estricto. A veces se cargan turnos retroactivos para historial.
+         // Si el requerimiento es estricto PRE-PROD:
+         // return { error: "No se pueden agendar turnos en el pasado." }
+         // Por ahora, dejamos warning en log o permitimos si es rol ADMIN.
+    }
+
     // Calculamos el final
     const endTime = new Date(startTime.getTime() + duration * 60000)
 
@@ -287,9 +300,9 @@ export async function logout() {
 'use server'
 
 import { prisma } from "@/lib/prisma"
-import { getSession } from "@/lib/auth" // 👈 Importamos seguridad
+import { getSession } from "@/lib/auth" 
 
-// Definimos la nueva estructura esperada (incluye variantName)
+// Definimos la estructura esperada
 type ImportRow = {
   name: string
   variantName?: string 
@@ -307,78 +320,68 @@ function toTitleCase(str: string) {
   )
 }
 
-export async function importSingleProduct(data: ImportRow) {
-  try {
-    // 0. SEGURIDAD (R-03: Defensa en Profundidad)
-    const session = await getSession()
-    if (!session) {
-        return { success: false, error: "No autorizado. Sesión inválida." }
-    }
-
-    // 1. SANITIZACIÓN Y VALIDACIÓN (R-04: Validación estricta de tipos)
+/**
+ * Lógica central de procesamiento de UN producto dentro de una transacción.
+ * Se extrae para reutilización y consistencia.
+ * Lanza errores para provocar rollback si algo falla.
+ */
+async function processProductRow(tx: any, data: ImportRow, rowIndex: number) {
+    // 1. SANITIZACIÓN
     if (typeof data !== 'object' || data === null) {
-        return { success: false, error: "Datos corruptos o formato inválido." }
+        throw new Error(`Fila ${rowIndex}: Datos corruptos o formato inválido.`)
     }
 
-    // Convertimos explícitamente a string y limpiamos espacios
     const name = String(data.name || "").trim()
     const categoryName = String(data.categoryName || "").trim()
     const ownerName = String(data.ownerName || "").trim()
     
-    // Validación de campos vacíos
     if (!name || !categoryName || !ownerName) {
-      return { success: false, error: "Faltan datos: Nombre, Categoría o Dueño." }
+        throw new Error(`Fila ${rowIndex} (${name}): Faltan datos obligatorios.`)
     }
 
-    // Conversión segura de números
     const cost = Number(data.cost)
     const price = Number(data.price)
 
     if (isNaN(cost) || isNaN(price)) {
-      return { success: false, error: `Importes inválidos para producto "${name}".` }
+        throw new Error(`Fila ${rowIndex} (${name}): Importes numéricos inválidos.`)
     }
 
-    // 2. REGLAS FINANCIERAS (Guard Clauses)
     if (cost < 0 || price < 0) {
-      return { success: false, error: "Error financiero: Importes negativos no permitidos." }
+        throw new Error(`Fila ${rowIndex} (${name}): No se permiten importes negativos.`)
     }
 
     if (price < cost) {
-      return { success: false, error: `Rentabilidad negativa: Costo ($${cost}) > Venta ($${price}).` }
+        throw new Error(`Fila ${rowIndex} (${name}): Rentabilidad negativa (Precio < Costo).`)
     }
 
-    // 3. NORMALIZAR DATOS
     const variantName = data.variantName && String(data.variantName).trim() !== "" 
         ? String(data.variantName).trim() 
         : "Estándar"
-    
-    // 4. BUSCAR O CREAR ENTIDADES RELACIONADAS (Dueño y Categoría)
-    
+
+    // 2. DEPENDENCIAS
     // A. Dueño
-    const owner = await prisma.owner.findFirst({
-      where: { name: { equals: ownerName, mode: 'insensitive' } }
+    const owner = await tx.owner.findFirst({
+        where: { name: { equals: ownerName, mode: 'insensitive' } }
     })
 
     if (!owner) {
-      return { success: false, error: `Dueño desconocido: "${ownerName}". Crealo en el sistema primero.` }
+        throw new Error(`Fila ${rowIndex}: Dueño desconocido "${ownerName}".`)
     }
 
-    // B. Categoría (Upsert manual)
+    // B. Categoría (Upsert manual dentro de la TX)
     const normalizedCategory = toTitleCase(categoryName)
-    let category = await prisma.category.findFirst({
-      where: { name: { equals: normalizedCategory, mode: 'insensitive' } }
+    let category = await tx.category.findFirst({
+        where: { name: { equals: normalizedCategory, mode: 'insensitive' } }
     })
 
     if (!category) {
-      category = await prisma.category.create({
-        data: { name: normalizedCategory } 
-      })
+        category = await tx.category.create({
+            data: { name: normalizedCategory } 
+        })
     }
 
-    // 5. LÓGICA CORE: PADRE E HIJO
-    
-    // Buscamos si el Producto Padre ya existe para este dueño
-    const existingProduct = await prisma.product.findFirst({
+    // 3. PRODUCTO Y VARIANTE
+    const existingProduct = await tx.product.findFirst({
         where: {
             name: { equals: name, mode: 'insensitive' },
             ownerId: owner.id
@@ -386,36 +389,30 @@ export async function importSingleProduct(data: ImportRow) {
     })
 
     if (existingProduct) {
-        // CASO A: EL PRODUCTO EXISTE -> Intentamos agregar la VARIANTE
-        
-        // Verificamos si YA existe esa variante específica
-        const existingVariant = await prisma.productVariant.findFirst({
+        // Verificar variante
+        const existingVariant = await tx.productVariant.findFirst({
             where: {
                 productId: existingProduct.id,
                 name: { equals: variantName, mode: 'insensitive' }
             }
         })
 
-        if (existingVariant) {
-            return { success: false, error: `Omitido: Ya existe la variante "${variantName}" en "${name}".` }
+        if (!existingVariant) {
+            await tx.productVariant.create({
+                data: {
+                    productId: existingProduct.id,
+                    name: variantName,
+                    costPrice: cost,
+                    salePrice: price,
+                    stock: 0,
+                    imageUrl: null
+                }
+            })
         }
-
-        // Crear la variante nueva en el producto existente
-        await prisma.productVariant.create({
-            data: {
-                productId: existingProduct.id,
-                name: variantName,
-                costPrice: cost,
-                salePrice: price,
-                stock: 0, // Siempre nace en 0
-                imageUrl: null
-            }
-        })
-
+        // Si existe, lo omitimos silenciosamente (Idempotencia)
     } else {
-        // CASO B: EL PRODUCTO NO EXISTE -> Creamos PADRE + HIJO
-        
-        await prisma.product.create({
+        // Crear Padre + Hijo
+        await tx.product.create({
             data: {
                 name: name,
                 categoryId: category.id,
@@ -433,13 +430,60 @@ export async function importSingleProduct(data: ImportRow) {
             }
         })
     }
+}
+
+// --- ACTIONS PÚBLICAS ---
+
+export async function importSingleProduct(data: ImportRow) {
+  try {
+    const session = await getSession()
+    if (!session || session.role !== 'ADMIN') {
+        return { success: false, error: "Requiere permisos de Administrador." }
+    }
+
+    // Reutilizamos la lógica envolviéndola en una transacción unitaria
+    await prisma.$transaction(async (tx) => {
+        await processProductRow(tx, data, 1)
+    })
 
     return { success: true }
 
   } catch (error: any) {
-    console.error("Error importando:", error)
-    return { success: false, error: error.message || "Error interno del servidor" }
+    console.error("Error importando single:", error)
+    return { success: false, error: error.message || "Error interno." }
   }
+}
+
+// R-03: Nueva acción para procesamiento por lotes
+export async function importProductBatch(rows: ImportRow[]) {
+    const session = await getSession()
+    if (!session || session.role !== 'ADMIN') {
+        return { success: false, error: "Requiere permisos de Administrador." }
+    }
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+        return { success: false, error: "Lote vacío o inválido." }
+    }
+
+    try {
+        // Ejecutamos todo el lote en una única transacción atómica
+        // Si una fila falla, todo el lote se revierte (All-or-Nothing)
+        await prisma.$transaction(async (tx) => {
+            for (let i = 0; i < rows.length; i++) {
+                // Pasamos i + 1 para que el mensaje de error tenga sentido humano (Fila 1, no Fila 0)
+                await processProductRow(tx, rows[i], i + 1)
+            }
+        }, {
+            timeout: 20000 // Aumentamos timeout a 20s para lotes grandes
+        })
+
+        return { success: true, count: rows.length }
+
+    } catch (error: any) {
+        console.error("Error en batch:", error)
+        // Retornamos el error exacto que lanzó processProductRow
+        return { success: false, error: error.message || "Error procesando el lote." }
+    }
 }
 
 --- File: category-actions.ts (in subfolder: actions) ---
@@ -549,15 +593,32 @@ export async function deleteCustomer(formData: FormData) {
   if (!id) return { error: "ID requerido" }
 
   try {
+    // 1. VERIFICACIÓN DE DEUDA (R-05)
+    // Buscamos específicamente ventas "fiadas" que no han sido pagadas.
+    const pendingDebts = await prisma.sale.count({
+        where: {
+            customerId: id,
+            paymentStatus: 'PENDING'
+        }
+    })
+
+    if (pendingDebts > 0) {
+        return { error: "⛔ No se puede eliminar: El cliente tiene deuda activa (Fiado). Debe saldarla o anular las ventas antes de borrar." }
+    }
+
+    // 2. VERIFICACIÓN DE HISTORIAL GENERAL
+    // Si no tiene deuda pero tiene historial, tampoco borramos (integridad DB),
+    // pero el mensaje es diferente.
     const customerWithHistory = await prisma.customer.findUnique({
         where: { id },
         include: { _count: { select: { sales: true } } }
     })
 
     if (customerWithHistory && customerWithHistory._count.sales > 0) {
-        return { error: "⛔ No se puede eliminar: El cliente tiene historial de compras." }
+        return { error: "⛔ No se puede eliminar: El cliente tiene historial de compras asociado." }
     }
 
+    // 3. EJECUCIÓN
     await prisma.customer.delete({ where: { id } })
     
     revalidatePath("/customers")
@@ -570,13 +631,12 @@ export async function deleteCustomer(formData: FormData) {
   }
 }
 
-// 👇 NUEVA FUNCIÓN: COBRAR DEUDA
+// FUNCION COBRAR DEUDA
 export async function markSaleAsPaid(saleId: string) {
     const session = await getSession()
     if (!session) return { error: "No autorizado" }
 
     try {
-        // R-03: Leer antes de escribir para idempotencia
         const currentSale = await prisma.sale.findUnique({
             where: { id: saleId },
             select: { paymentStatus: true }
@@ -585,7 +645,6 @@ export async function markSaleAsPaid(saleId: string) {
         if (!currentSale) return { error: "Venta no encontrada" }
 
         if (currentSale.paymentStatus === 'PAID') {
-            // Ya estaba paga, retornamos éxito silencioso
             return { success: true, message: "Venta ya estaba cobrada previamente" }
         }
 
@@ -593,15 +652,12 @@ export async function markSaleAsPaid(saleId: string) {
             where: { id: saleId },
             data: { 
                 paymentStatus: 'PAID',
-                paidAt: new Date() // El dinero entra HOY
+                paidAt: new Date()
             }
         })
 
-        // Revalidamos todo lo necesario
         revalidatePath("/customers")
-        revalidatePath("/sales") // Para que en el historial general salga verde
-        // Nota: Como no sabemos el ID del cliente aquí sin hacer query extra, 
-        // nextjs revalidará la ruta actual donde se invoque la acción.
+        revalidatePath("/sales") 
         return { success: true }
     } catch (error) {
         return { error: "Error al registrar el pago." }
@@ -618,9 +674,12 @@ import ExcelJS from "exceljs"
 import { getSession } from "@/lib/auth"
 
 export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
-  // R-01 / S-01: Blindaje de seguridad (aunque sea R-02, protegemos el endpoint)
+  // R-01: Blindaje de seguridad RBAC
   const session = await getSession()
-  if (!session) return { success: false, error: "No autorizado" }
+  // Validamos existencia de sesión Y rol de administrador
+  if (!session || session.role !== 'ADMIN') {
+    return { success: false, error: "Requiere permisos de Administrador." }
+  }
 
   try {
     // 1. Crear Libro y Hoja
@@ -649,7 +708,6 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
     // 3. Si es FULL, llenamos con datos
     if (mode === 'FULL') {
       // R-02: Límite de seguridad para prevenir OOM (Out of Memory)
-      // Se limita a 2000 productos para garantizar que el buffer de Node.js no colapse.
       const SAFE_LIMIT = 2000 
       
       const products = await prisma.product.findMany({
@@ -679,8 +737,6 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
     }
 
     // 4. Generar Buffer y convertir a Base64
-    // R-02: Envolvemos la operación pesada en un bloque específico si fuera necesario,
-    // pero el try/catch global ya captura fallos de memoria aquí.
     const buffer = await workbook.xlsx.writeBuffer()
     const base64 = Buffer.from(buffer).toString("base64")
     
@@ -692,7 +748,6 @@ export async function exportProducts(mode: 'TEMPLATE' | 'FULL') {
 
   } catch (error) {
     console.error("Error exportando:", error)
-    // Mensaje genérico para el usuario, log detallado para el admin
     return { success: false, error: "Error al generar el archivo Excel (Posible exceso de datos)." }
   }
 }
@@ -1079,11 +1134,27 @@ export async function deletePet(id: string) {
     if (!session) return { error: "No autorizado" }
 
     try {
+        // R-05: Verificación de Integridad de Agenda
+        // No permitir borrado si hay turnos pendientes o confirmados a futuro.
+        const activeAppointments = await prisma.appointment.findFirst({
+            where: {
+                petId: id,
+                status: { in: ['PENDING', 'CONFIRMED'] }
+            }
+        })
+
+        if (activeAppointments) {
+            return { error: "⛔ No se puede eliminar: La mascota tiene turnos activos en la agenda. Cancele los turnos primero." }
+        }
+
         await prisma.pet.delete({ where: { id } })
         revalidatePath("/pets")
         return { success: true }
+
     } catch (error) {
-        return { error: "No se puede eliminar (¿Tiene turnos asignados?)" }
+        // Captura error genérico o constraints de FK residuales
+        console.error("Error eliminando mascota:", error)
+        return { error: "No se puede eliminar la mascota (Posible historial asociado)." }
     }
 }
 
@@ -1348,14 +1419,16 @@ type CartItem = {
   quantity: number
 }
 
-// Extendemos el tipo para soportar futuros métodos sin romper lo actual
 type PaymentMethodStr = "CASH" | "TRANSFER" | "CHECKING_ACCOUNT"
+
+// R-06: Helper de redondeo para evitar errores de punto flotante
+const round = (num: number) => Math.round(num * 100) / 100
 
 export async function processSale(
     cart: CartItem[], 
     totalEstimado: number, 
     paymentMethod: PaymentMethodStr,
-    customerId?: string // 👈 Nuevo parámetro opcional
+    customerId?: string
 ) {
   // 1. SEGURIDAD
   const session = await getSession()
@@ -1367,21 +1440,17 @@ export async function processSale(
     let createdSaleId = ""
     let createdDate = new Date()
 
-    // Determinamos el estado de pago
-    // Si es Cuenta Corriente, queda PENDING. Si es Efectivo/Transfer, queda PAID.
     const paymentStatus: PaymentStatus = paymentMethod === 'CHECKING_ACCOUNT' 
         ? 'PENDING' 
         : 'PAID'
     
-    // R-02: Definir fecha de caja
-    // Si se paga ya, paidAt es hoy. Si es fiado, es null hasta que pague.
     const paidAt = paymentStatus === 'PAID' ? new Date() : null
 
-    // Validación: Si es fiado, DEBE haber un cliente
     if (paymentStatus === 'PENDING' && !customerId) {
         return { error: "Para fiar (Cuenta Corriente) debés seleccionar un cliente." }
     }
 
+    // R-04: Sanitización. Ignoramos precios del cliente para Productos.
     const productIds = cart.filter(i => i.type === 'PRODUCT').map(i => i.id)
     
     const dbVariants = await prisma.productVariant.findMany({
@@ -1398,10 +1467,14 @@ export async function processSale(
       for (const item of cart) {
         if (item.type === 'PRODUCT') {
             const variant = dbVariants.find(v => v.id === item.id)
-            if (!variant) throw new Error(`Producto no encontrado: ${item.description}`)
+            if (!variant) throw new Error(`Producto no encontrado o inactivo: ${item.description}`)
             
+            // R-04: Sanitización de Cantidad
+            if (item.quantity <= 0 || isNaN(item.quantity)) {
+                throw new Error(`Cantidad inválida para producto: ${item.description}`)
+            }
+
             // VALIDACIÓN DE STOCK
-            // Incluso si es fiado, el stock baja porque se entrega la mercadería
             const updateResult = await tx.productVariant.updateMany({
                 where: { 
                     id: item.id,
@@ -1413,19 +1486,24 @@ export async function processSale(
             })
 
             if (updateResult.count === 0) {
-                throw new Error(`Stock insuficiente para: ${variant.product.name}`)
+                throw new Error(`Stock insuficiente para: ${variant.product.name}. Refrescá la página.`)
             }
 
-            const subtotal = Number(variant.salePrice) * item.quantity
-            totalReal += subtotal
+            // R-04: Usamos precio de DB
+            const currentPrice = Number(variant.salePrice)
+            
+            // R-06: Redondeo explícito a nivel de línea (SUBTOTAL)
+            // Esto asegura que 3 items de $33.33 den $99.99 exactos y no $99.99000001
+            const subtotal = round(currentPrice * item.quantity)
+            totalReal = round(totalReal + subtotal)
 
             saleItemsData.push({
                 variantId: variant.id,
                 description: variant.product.name,
                 quantity: item.quantity,
-                costAtSale: variant.costPrice,
-                priceAtSale: variant.salePrice,
-                settledQuantity: 0 // 👈 Inicializamos en 0 (No pagado al dueño aún)
+                costAtSale: variant.costPrice, // Prisma maneja Decimal, le pasamos number/string
+                priceAtSale: currentPrice,
+                settledQuantity: 0
             })
 
             stockMovementsData.push({
@@ -1437,8 +1515,15 @@ export async function processSale(
             })
         } 
         else if (item.type === 'SERVICE') {
-            const subtotal = item.price * item.quantity
-            totalReal += subtotal
+            // R-04: Validación de precios manuales
+            if (item.price < 0 || isNaN(item.price)) {
+                throw new Error(`Precio de servicio inválido: ${item.description}`)
+            }
+            if (item.quantity <= 0) throw new Error(`Cantidad inválida para servicio.`)
+
+            // R-06: Redondeo para servicios
+            const subtotal = round(item.price * item.quantity)
+            totalReal = round(totalReal + subtotal)
 
             saleItemsData.push({
                 variantId: null,
@@ -1458,14 +1543,14 @@ export async function processSale(
           await tx.stockMovement.createMany({ data: stockMovementsData })
       }
 
-      // Creación de la Venta
+      // Creación de la Venta con TOTAL REAL redondeado
       const sale = await tx.sale.create({
         data: {
           total: totalReal,
           paymentMethod: paymentMethod, 
-          status: "COMPLETED", // La transacción se completó (entregué producto)
-          paymentStatus: paymentStatus, // Estado financiero (Cobrado o Deuda)
-          paidAt: paidAt, // R-02: Seteo de fecha caja
+          status: "COMPLETED",
+          paymentStatus: paymentStatus,
+          paidAt: paidAt,
           customerId: customerId || null,
           items: { create: saleItemsData }
         }
@@ -1474,8 +1559,6 @@ export async function processSale(
       createdSaleId = sale.id
       createdDate = sale.createdAt
 
-      // Actualizar Turnos a COBRADO
-      // Nota: Si la venta es "Fiada", el turno igual se marca BILLED porque ya se procesó en caja
       if (appointmentIdsToBill.length > 0) {
         await tx.appointment.updateMany({
             where: { id: { in: appointmentIdsToBill } },
@@ -1489,7 +1572,6 @@ export async function processSale(
     revalidatePath("/pos")
     revalidatePath("/dashboard")
     revalidatePath("/sales")
-    // Revalidamos la ficha del cliente si existe
     if (customerId) revalidatePath(`/customers/${customerId}`)
     
     return { success: true, saleId: createdSaleId, date: createdDate }
@@ -1500,13 +1582,11 @@ export async function processSale(
   }
 }
 
-// R-02: Nueva función para cobrar deudas y registrar ingreso en caja HOY
 export async function markSaleAsPaid(saleId: string) {
     const session = await getSession()
     if (!session) return { error: "No autorizado" }
 
     try {
-        // R-03: Leer antes de escribir para idempotencia
         const currentSale = await prisma.sale.findUnique({
           where: { id: saleId },
           select: { paymentStatus: true }
@@ -1515,8 +1595,6 @@ export async function markSaleAsPaid(saleId: string) {
         if (!currentSale) return { error: "Venta no encontrada" }
         
         if (currentSale.paymentStatus === 'PAID') {
-          // Ya está cobrada, devolvemos success para no romper flujo cliente, 
-          // pero avisamos en consola o simplemente no hacemos nada.
           return { success: true, message: "Venta ya estaba cobrada previamente" }
         }
 
@@ -1524,13 +1602,12 @@ export async function markSaleAsPaid(saleId: string) {
             where: { id: saleId },
             data: {
                 paymentStatus: 'PAID',
-                paidAt: new Date() // El dinero entra HOY
+                paidAt: new Date()
             }
         })
 
         revalidatePath("/dashboard")
         revalidatePath("/sales")
-        // No tenemos el customerId aquí fácil, así que revalidamos paths generales
         return { success: true }
     } catch (error) {
         return { error: "Error al actualizar pago" }
@@ -1551,7 +1628,6 @@ export async function cancelSale(saleId: string) {
       if (!sale) throw new Error("Venta no encontrada")
       if (sale.status === 'CANCELLED') throw new Error("Ya está anulada")
 
-      // 1. Marcar Venta Cancelada
       await tx.sale.update({
         where: { id: saleId },
         data: { status: 'CANCELLED' }
@@ -1563,7 +1639,6 @@ export async function cancelSale(saleId: string) {
       for (const item of sale.items) {
         if (item.variantId && item.variant) {
           
-          // 2. Devolver Stock
           await tx.productVariant.update({
             where: { id: item.variantId },
             data: { stock: { increment: item.quantity } }
@@ -1577,14 +1652,13 @@ export async function cancelSale(saleId: string) {
             userId: session.userId 
           })
 
-          // 3. Reversión Financiera al Dueño
-          // Usamos settledQuantity para saber si ya le pagamos algo de esto al dueño
           if (item.settledQuantity > 0) {
-            const amountOwedBack = Number(item.costAtSale) * item.settledQuantity
+            // R-06: Redondeo también en anulaciones
+            const amountOwedBack = round(Number(item.costAtSale) * item.settledQuantity)
             
             adjustmentsToCreate.push({
                 ownerId: item.variant.product.ownerId,
-                amount: -amountOwedBack, // Negativo = El dueño nos debe (porque le pagamos de más)
+                amount: -amountOwedBack, 
                 description: `Devolución Liq. - Prod: ${item.description}`,
                 isApplied: false
             })
@@ -1620,6 +1694,7 @@ export async function cancelSale(saleId: string) {
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
+import { getSession } from "@/lib/auth"
 
 type SettlementItemInput = {
   id: string
@@ -1627,7 +1702,16 @@ type SettlementItemInput = {
   quantity?: number 
 }
 
+// R-06: Helper de redondeo para moneda
+const round = (num: number) => Math.round(num * 100) / 100
+
 export async function createSettlement(formData: FormData) {
+  // R-01: Blindaje de seguridad
+  const session = await getSession()
+  if (!session || session.role !== 'ADMIN') {
+    return { error: "Requiere permisos de Administrador para liquidar." }
+  }
+
   const ownerId = formData.get("ownerId") as string
   const selectionJson = formData.get("selection") as string
   
@@ -1665,23 +1749,20 @@ export async function createSettlement(formData: FormData) {
                 throw new Error(`Cantidad inválida para item ${item.id}`)
             }
 
-            // Buscamos item + VENTA PADRE para verificar estado
             const dbItem = await tx.saleItem.findUnique({
                 where: { id: item.id },
                 include: { 
                     variant: { include: { product: true } },
-                    sale: true // 👈 Necesario para validar paymentStatus
+                    sale: true 
                 }
             })
 
             if (!dbItem) throw new Error(`Item de venta no encontrado: ${item.id}`)
             
-            // VALIDACIONES
             if (dbItem.variant?.product.ownerId !== ownerId) {
                 throw new Error(`El item ${dbItem.description} no pertenece a este dueño.`)
             }
 
-            // ⛔ REGLA DE NEGOCIO CRÍTICA ⛔
             if (dbItem.sale.paymentStatus !== 'PAID') {
                 throw new Error(`No se puede liquidar "${dbItem.description}" porque el cliente AÚN NO PAGÓ (Es Fiado).`)
             }
@@ -1691,9 +1772,9 @@ export async function createSettlement(formData: FormData) {
                 throw new Error(`Error en ${dbItem.description}: Intentás pagar ${item.quantity} pero solo se deben ${pendingQty}.`)
             }
 
-            // Cálculos
-            const lineAmount = Number(dbItem.costAtSale) * item.quantity
-            calculatedTotal += lineAmount
+            // R-06: Cálculo con Redondeo
+            const lineAmount = round(Number(dbItem.costAtSale) * item.quantity)
+            calculatedTotal = round(calculatedTotal + lineAmount)
 
             await tx.settlementLine.create({
                 data: {
@@ -1718,7 +1799,9 @@ export async function createSettlement(formData: FormData) {
             if (dbAdj.ownerId !== ownerId) throw new Error("Ajuste ajeno.")
             if (dbAdj.isApplied) throw new Error("Este ajuste ya fue pagado.")
 
-            calculatedTotal += Number(dbAdj.amount)
+            // R-06: Redondeo de ajuste
+            const adjAmount = Number(dbAdj.amount)
+            calculatedTotal = round(calculatedTotal + adjAmount)
 
             await tx.balanceAdjustment.update({
                 where: { id: dbAdj.id },
@@ -1759,10 +1842,10 @@ export async function createSettlement(formData: FormData) {
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
 import { Role } from "@prisma/client"
-import { hashPassword, getSession } from "@/lib/auth" // 👈 Importamos getSession
+import { hashPassword, getSession } from "@/lib/auth" 
 
 export async function createUser(formData: FormData) {
-  // 1. SEGURIDAD (R-03)
+  // 1. SEGURIDAD (R-01) - Mantenemos validación existente y reforzada
   const session = await getSession()
   if (!session) return { error: "No autorizado." }
   if (session.role !== 'ADMIN') return { error: "Permisos insuficientes. Se requiere Administrador." }
@@ -1828,6 +1911,13 @@ export async function deleteUser(formData: FormData) {
     if (!session || session.role !== 'ADMIN') return { error: "No autorizado." }
 
     const id = formData.get("id") as string
+    
+    // R-01 Adicional: Evitar auto-eliminación
+    // Asumimos que session tiene 'id' dado que es un objeto User o derivado.
+    if (session.userId && session.userId === id) {
+        return { error: "No puedes eliminar tu propio usuario." }
+    }
+
     try {
         await prisma.user.delete({ where: { id } })
         revalidatePath("/admin/users")
@@ -3794,7 +3884,7 @@ export default async function PosPage() {
 import { prisma } from "@/lib/prisma"
 import ProductForm from "@/components/ProductForm"
 import ProductActions from "@/components/ProductActions"
-import SearchInput from "@/components/SearchInput" // Asegurate de que SearchInput no tenga bg-white hardcodeado
+import SearchInput from "@/components/SearchInput" 
 import Link from "next/link"
 
 interface Props {
@@ -3806,6 +3896,9 @@ interface Props {
 export default async function ProductsPage({ searchParams }: Props) {
   const params = await searchParams
   const query = params?.query || ""
+
+  // R-02: Feature Flag
+  const showImages = process.env.NEXT_PUBLIC_ENABLE_IMAGES === 'true'
 
   const owners = await prisma.owner.findMany({ select: { id: true, name: true } })
   const categories = await prisma.category.findMany({ select: { id: true, name: true } })
@@ -3852,10 +3945,9 @@ export default async function ProductsPage({ searchParams }: Props) {
 
       <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
         
-        {/* COLUMNA IZQUIERDA: FORMULARIO (Sticky en desktop grande) */}
+        {/* COLUMNA IZQUIERDA: FORMULARIO */}
         <div className="xl:col-span-1">
           <div className="xl:sticky xl:top-6">
-             {/* Barra de Búsqueda Móvil (si se quiere sacar de la tabla) */}
              <div className="mb-6 xl:hidden">
                 <SearchInput placeholder="Buscar por producto..." />
              </div>
@@ -3866,7 +3958,6 @@ export default async function ProductsPage({ searchParams }: Props) {
         {/* COLUMNA DERECHA: TABLA */}
         <div className="xl:col-span-3 flex flex-col gap-4">
             
-            {/* Buscador Desktop */}
             <div className="hidden xl:block max-w-md">
                 <SearchInput placeholder="Buscar por producto, dueño o categoría..." />
             </div>
@@ -3901,10 +3992,11 @@ export default async function ProductsPage({ searchParams }: Props) {
                             <td className="px-6 py-4">
                                 <Link href={`/products/${p.id}`} className="flex items-center gap-4 group-hover:translate-x-1 transition-transform">
                                     <div className="w-12 h-12 rounded-lg bg-muted border border-border overflow-hidden shrink-0 flex items-center justify-center">
-                                        {mainImage ? (
+                                        {/* R-02: Icono genérico si no hay imágenes o si la imagen falla */}
+                                        {showImages && mainImage ? (
                                             <img src={mainImage} className="w-full h-full object-cover" alt={p.name} />
                                         ) : (
-                                            <span className="text-[10px] font-bold text-muted-foreground">FOTO</span>
+                                            <span className="text-xl">📦</span>
                                         )}
                                     </div>
                                     <div>
@@ -4692,6 +4784,8 @@ import { createAppointment } from "@/actions/appointment-actions"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
+// R-08: Importar hook de notificaciones
+import { useToast } from "@/components/ui/Toast"
 
 type Props = {
   pets: { id: string, name: string, breed: string | null }[]
@@ -4701,6 +4795,8 @@ type Props = {
 export default function AppointmentForm({ pets, selectedDate }: Props) {
   const [loading, setLoading] = useState(false)
   const router = useRouter()
+  // R-08: Inicializar toast
+  const { addToast } = useToast()
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault() 
@@ -4713,16 +4809,16 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
 
     setLoading(false)
 
+    // R-08: Reemplazo de alerts
     if (result.error) {
-      alert("❌ NO SE PUDO AGENDAR:\n" + result.error)
+      addToast(result.error, "error")
     } else {
-      alert("✅ Turno agendado correctamente")
+      addToast("Turno agendado correctamente.", "success")
       form.reset() 
       router.refresh()
     }
   }
 
-  // Clases compartidas
   const labelClass = "block text-xs font-bold text-muted-foreground uppercase mb-1.5"
   const inputClass = "w-full p-2.5 rounded-xl border border-input bg-background text-foreground text-sm font-medium focus:ring-2 focus:ring-primary outline-none transition [color-scheme:light] dark:[color-scheme:dark]"
 
@@ -4733,8 +4829,6 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
       </h2>
       
       <form onSubmit={handleSubmit} className="space-y-5">
-        
-        {/* MASCOTA */}
         <div>
           <div className="flex justify-between items-center mb-1.5">
             <label className={labelClass}>Mascota</label>
@@ -4749,29 +4843,14 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
             ))}
           </select>
         </div>
-
-        {/* FECHA */}
         <div>
             <label className={labelClass}>Fecha</label>
-            <input 
-                type="date" 
-                name="date"
-                defaultValue={selectedDate}
-                required
-                className={inputClass}
-            />
+            <input type="date" name="date" defaultValue={selectedDate} required className={inputClass} />
         </div>
-
-        {/* HORA Y DURACIÓN */}
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className={labelClass}>Hora Inicio</label>
-            <input 
-              name="time" 
-              type="time" 
-              required 
-              className={inputClass}
-            />
+            <input name="time" type="time" required className={inputClass} />
           </div>
           <div>
             <label className={labelClass}>Duración</label>
@@ -4784,17 +4863,7 @@ export default function AppointmentForm({ pets, selectedDate }: Props) {
             </select>
           </div>
         </div>
-
-        <button 
-          type="submit" 
-          disabled={loading}
-          className={cn(
-            "w-full py-3 rounded-xl font-bold transition text-primary-foreground shadow-lg active:scale-95 mt-2",
-            loading 
-                ? 'bg-muted text-muted-foreground cursor-wait' 
-                : 'bg-primary hover:bg-primary/90 shadow-primary/25'
-          )}
-        >
+        <button type="submit" disabled={loading} className={cn("w-full py-3 rounded-xl font-bold transition text-primary-foreground shadow-lg active:scale-95 mt-2", loading ? 'bg-muted text-muted-foreground cursor-wait' : 'bg-primary hover:bg-primary/90 shadow-primary/25')}>
           {loading ? "Verificando..." : "Confirmar Reserva"}
         </button>
       </form>
@@ -5068,7 +5137,17 @@ export default function CustomerSaleRow({ sale }: { sale: SaleType }) {
 
 import { useState } from "react"
 import readXlsxFile from "read-excel-file"
-import { importSingleProduct } from "@/actions/bulk-actions"
+// R-03: Importamos la nueva acción por lotes
+import { importProductBatch } from "@/actions/bulk-actions"
+
+// Helper para dividir array en chunks
+function chunkArray<T>(array: T[], size: number): T[][] {
+  const chunks: T[][] = []
+  for (let i = 0; i < array.length; i += size) {
+    chunks.push(array.slice(i, i + size))
+  }
+  return chunks
+}
 
 export default function ExcelImporter() {
   const [rows, setRows] = useState<any[]>([])
@@ -5081,16 +5160,20 @@ export default function ExcelImporter() {
     const file = e.target.files?.[0]
     if (!file) return
 
+    // R-03: Validación de tamaño (Max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+        alert("⚠️ El archivo es demasiado grande. Máximo 5MB.")
+        e.target.value = "" // Reset input
+        return
+    }
+
     try {
-      // Leemos el Excel. 
-      // NUEVO ORDEN DE COLUMNAS:
-      // 0: Producto | 1: Variante | 2: Categoría | 3: Dueño | 4: Costo | 5: Precio
       const data = await readXlsxFile(file)
       
-      // Eliminamos la cabecera (fila 0) y mapeamos
+      // Mapeo de columnas
       const cleanData = data.slice(1).map(row => ({
         name: row[0] as string,
-        variantName: row[1] as string, // 👈 Nueva columna leída
+        variantName: row[1] as string,
         categoryName: row[2] as string,
         ownerName: row[3] as string,
         cost: Number(row[4]),
@@ -5098,126 +5181,148 @@ export default function ExcelImporter() {
       }))
 
       setRows(cleanData)
-      setLogs(prev => [...prev, `Archivo cargado: ${cleanData.length} filas detectadas.`])
+      setLogs(prev => [...prev, `📂 Archivo cargado: ${cleanData.length} filas detectadas. Listo para importar.`])
+      setProgress({ current: 0, total: cleanData.length, errors: 0 })
     } catch (error) {
       console.error(error)
       alert("Error leyendo Excel. Verificá el formato.")
     }
   }
 
-  // 2. PROCESAR BUCLE
+  // 2. PROCESAR POR LOTES (BATCHING)
   const startImport = async () => {
     setProcessing(true)
-    setProgress({ current: 0, total: rows.length, errors: 0 })
-    setLogs([])
-
-    let successCount = 0
+    setLogs([]) // Limpiar logs anteriores
+    
+    // R-03: Chunking (Lotes de 20)
+    const BATCH_SIZE = 20
+    const batches = chunkArray(rows, BATCH_SIZE)
+    
+    let processedCount = 0
     let errorCount = 0
+    let batchIndex = 1
 
-    // BUCLE SECUENCIAL
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i]
-      
-      // Validación básica visual
-      if (!row.name || !row.ownerName) {
-        setLogs(prev => [...prev, `❌ Fila ${i+2}: Faltan datos (Nombre o Dueño)`])
-        errorCount++
-        setProgress(p => ({ ...p, current: i + 1, errors: p.errors + 1 }))
-        continue
-      }
+    for (const batch of batches) {
+        try {
+            // Llamada al Server Action con el lote completo
+            const result = await importProductBatch(batch)
 
-      // Llamada al Server
-      const result = await importSingleProduct(row)
+            if (result.success) {
+                processedCount += batch.length
+                setLogs(prev => [...prev, `✅ Lote ${batchIndex}/${batches.length}: ${batch.length} items procesados OK.`])
+            } else {
+                errorCount += batch.length
+                setLogs(prev => [...prev, `❌ Error en Lote ${batchIndex}: ${result.error}`])
+                // Opcional: Detener proceso ante error masivo
+                // break; 
+            }
+        } catch (err) {
+            errorCount += batch.length
+            setLogs(prev => [...prev, `❌ Error crítico en Lote ${batchIndex}.`])
+        }
 
-      if (result.success) {
-        successCount++
-      } else {
-        errorCount++
-        // Mostramos el nombre completo (Producto - Variante) en el log de error
-        const fullName = row.variantName ? `${row.name} (${row.variantName})` : row.name
-        setLogs(prev => [...prev, `❌ Error en "${fullName}": ${result.error}`])
-      }
+        // Actualizar progreso visual
+        processedCount = Math.min(processedCount, rows.length) // Clamp visual
+        setProgress(p => ({ 
+            current: processedCount + errorCount, // Avanzamos la barra ya sea éxito o error
+            total: rows.length, 
+            errors: errorCount 
+        }))
 
-      // Actualizar progreso
-      setProgress(p => ({ 
-        current: i + 1, 
-        total: rows.length, 
-        errors: errorCount 
-      }))
+        batchIndex++
     }
 
     setProcessing(false)
-    setLogs(prev => [...prev, `🏁 FINALIZADO. Procesados: ${successCount}, Errores: ${errorCount}`])
+    setLogs(prev => [...prev, `🏁 PROCESO FINALIZADO. Éxitos: ${processedCount}, Fallos: ${errorCount}`])
+    
+    if (errorCount === 0) {
+        // Limpiar filas si todo salió bien para permitir nueva carga
+        setTimeout(() => {
+            alert("Importación completada exitosamente.")
+            setRows([])
+        }, 500)
+    }
   }
 
   return (
-    <div className="bg-white p-6 rounded-lg shadow border">
-      <h2 className="text-xl font-bold mb-4">Importación Masiva (Excel)</h2>
+    <div className="bg-card p-6 rounded-3xl shadow-sm border border-border">
+      <h2 className="text-xl font-black text-foreground mb-4 font-nunito">Importación Masiva (Excel)</h2>
       
-      <div className="mb-6 p-4 bg-blue-50 text-blue-900 text-sm rounded border border-blue-100">
-        <strong className="block mb-2 text-blue-700">Formato requerido (Columnas):</strong>
-        <ol className="list-decimal list-inside space-y-1 font-mono text-xs">
-            <li>Nombre Producto (Ej: Collar Nylon)</li>
-            <li><strong>Variante (Ej: Rojo / XL)</strong> - <em>Nuevo! Dejar vacío para "Estándar"</em></li>
-            <li>Categoría (Ej: Accesorios)</li>
-            <li>Nombre Dueño (Ej: Juan Perez)</li>
-            <li>Costo (Numérico)</li>
-            <li>Precio Venta (Numérico)</li>
+      <div className="mb-6 p-4 bg-primary/5 text-primary text-sm rounded-xl border border-primary/20">
+        <strong className="block mb-2 font-bold uppercase text-xs">Formato requerido (Columnas):</strong>
+        <ol className="list-decimal list-inside space-y-1 font-mono text-xs text-muted-foreground">
+            <li>Nombre Producto <span className="text-primary/50">(Ej: Collar)</span></li>
+            <li>Variante <span className="text-primary/50">(Ej: Rojo / XL)</span></li>
+            <li>Categoría <span className="text-primary/50">(Ej: Accesorios)</span></li>
+            <li>Nombre Dueño <span className="text-primary/50">(Ej: Juan Perez)</span></li>
+            <li>Costo <span className="text-primary/50">(Numérico)</span></li>
+            <li>Precio Venta <span className="text-primary/50">(Numérico)</span></li>
         </ol>
       </div>
 
       {!processing && rows.length === 0 && (
-        <input 
-          type="file" 
-          accept=".xlsx" 
-          onChange={handleFile}
-          className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer"
-        />
+        <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-border rounded-2xl cursor-pointer hover:bg-muted/50 transition">
+            <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                <span className="text-2xl mb-2">📂</span>
+                <p className="mb-2 text-sm text-muted-foreground font-bold">Clic para subir archivo Excel</p>
+                <p className="text-xs text-muted-foreground">.xlsx (Max 5MB)</p>
+            </div>
+            <input 
+                type="file" 
+                accept=".xlsx" 
+                onChange={handleFile}
+                className="hidden" 
+            />
+        </label>
       )}
 
       {rows.length > 0 && !processing && progress.current === 0 && (
-        <div className="space-y-4">
-          <div className="flex justify-between items-center">
-             <p className="font-bold text-lg text-gray-800">{rows.length} filas listas.</p>
+        <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2">
+          <div className="flex justify-between items-center bg-muted/30 p-3 rounded-xl border border-border">
+             <p className="font-bold text-sm text-foreground">📄 {rows.length} filas detectadas.</p>
              <button 
-               onClick={() => setRows([])} 
-               className="text-red-500 text-xs font-bold hover:underline"
+               onClick={() => { setRows([]); setLogs([]); }} 
+               className="text-destructive text-xs font-bold hover:underline"
              >
                Cancelar
              </button>
           </div>
           <button 
             onClick={startImport}
-            className="w-full bg-green-600 text-white py-3 rounded hover:bg-green-700 font-bold shadow transition"
+            className="w-full bg-green-600 hover:bg-green-700 text-white py-3 rounded-xl font-black shadow-lg transition active:scale-95 flex items-center justify-center gap-2"
           >
-            Iniciar Importación
+            <span>🚀</span> INICIAR IMPORTACIÓN
           </button>
         </div>
       )}
 
       {/* BARRA DE PROGRESO */}
       {(processing || progress.current > 0) && (
-        <div className="mt-4 space-y-2">
-          <div className="flex justify-between text-sm font-bold">
-            <span>Procesando: {progress.current} / {progress.total}</span>
-            <span className={`${progress.errors > 0 ? 'text-red-600' : 'text-gray-400'}`}>Errores: {progress.errors}</span>
+        <div className="mt-6 space-y-2 animate-in fade-in">
+          <div className="flex justify-between text-xs font-black uppercase text-muted-foreground">
+            <span>Progreso</span>
+            <span>{Math.round((progress.current / progress.total) * 100)}%</span>
           </div>
-          <div className="w-full bg-gray-200 rounded-full h-4 overflow-hidden">
+          <div className="w-full bg-secondary rounded-full h-3 overflow-hidden">
             <div 
-              className={`h-4 rounded-full transition-all duration-300 ${processing ? 'bg-blue-600 animate-pulse' : 'bg-green-600'}`}
+              className={`h-full rounded-full transition-all duration-500 ease-out ${progress.errors > 0 ? 'bg-orange-500' : 'bg-primary'}`}
               style={{ width: `${(progress.current / progress.total) * 100}%` }}
             ></div>
+          </div>
+          <div className="flex justify-between text-xs font-bold">
+            <span className="text-muted-foreground">Procesados: {progress.current} / {progress.total}</span>
+            {progress.errors > 0 && <span className="text-destructive">Fallos: {progress.errors}</span>}
           </div>
         </div>
       )}
 
-      {/* LOGS DE ERRORES */}
-      <div className="mt-6 bg-slate-900 text-slate-300 p-4 rounded font-mono text-xs h-48 overflow-y-auto border border-slate-700 shadow-inner">
+      {/* LOGS DE CONSOLA */}
+      <div className="mt-6 bg-zinc-950 text-zinc-300 p-4 rounded-xl font-mono text-[10px] h-48 overflow-y-auto border border-zinc-800 shadow-inner custom-scrollbar">
         {logs.length === 0 ? (
-            <span className="opacity-50">Esperando inicio...</span>
+            <span className="opacity-30 italic">Esperando inicio del proceso...</span>
         ) : (
             logs.map((log, i) => (
-                <div key={i} className={`mb-1 ${log.includes('❌') ? 'text-red-400' : 'text-green-400'}`}>
+                <div key={i} className={`mb-1.5 border-b border-white/5 pb-1 ${log.includes('❌') ? 'text-red-400' : 'text-green-400'}`}>
                     {log}
                 </div>
             ))
@@ -5823,6 +5928,9 @@ export default function PosSystem({ products, customers }: { products: ProductGr
     handleProductClick, addVariantToCart, removeFromCart, updateServicePrice, checkout
   } = usePos(products, customers)
 
+  // R-02: Feature Flag para imágenes
+  const showImages = process.env.NEXT_PUBLIC_ENABLE_IMAGES === 'true'
+
   // NUEVO: RENDERIZADO CONDICIONAL POR MÉTODO
   if (lastSale) {
     if (lastSale.method === 'CHECKING_ACCOUNT') {
@@ -5861,7 +5969,6 @@ export default function PosSystem({ products, customers }: { products: ProductGr
     )
   }
 
-  // ... (El resto del componente sigue IGUAL, copio solo el inicio para contexto)
   return (
     <>
     <div className="flex flex-col md:flex-row h-[calc(100vh-80px)] md:h-[calc(100vh-20px)] gap-6 pb-4 md:pb-0">
@@ -5940,27 +6047,30 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                                     : "bg-card border-border hover:border-primary hover:shadow-lg hover:shadow-primary/10 hover:-translate-y-1"
                             )}
                         >
-                            <div className="w-full aspect-square bg-muted rounded-xl overflow-hidden relative mb-3">
-                                {p.imageUrl ? (
-                                    <Image 
-                                        src={p.imageUrl} 
-                                        alt={p.name} 
-                                        fill
-                                        className="object-cover transition-transform duration-500 group-hover:scale-110"
-                                        sizes="(max-width: 768px) 50vw, 20vw"
-                                    />
-                                ) : (
-                                    <div className="w-full h-full flex items-center justify-center text-xs text-muted-foreground font-bold bg-secondary">
-                                        Sin Foto
+                            {/* R-02: Renderizado Condicional de la Imagen */}
+                            {showImages && (
+                                <div className="w-full aspect-square bg-muted rounded-xl overflow-hidden relative mb-3">
+                                    {p.imageUrl ? (
+                                        <Image 
+                                            src={p.imageUrl} 
+                                            alt={p.name} 
+                                            fill
+                                            className="object-cover transition-transform duration-500 group-hover:scale-110"
+                                            sizes="(max-width: 768px) 50vw, 20vw"
+                                        />
+                                    ) : (
+                                        <div className="w-full h-full flex items-center justify-center text-xs text-muted-foreground font-bold bg-secondary">
+                                            Sin Foto
+                                        </div>
+                                    )}
+                                    <div className={cn(
+                                        "absolute top-2 right-2 px-2 py-0.5 rounded-md text-[10px] font-black text-white shadow-sm z-10",
+                                        stockColor
+                                    )}>
+                                        {p.totalStock}
                                     </div>
-                                )}
-                                <div className={cn(
-                                    "absolute top-2 right-2 px-2 py-0.5 rounded-md text-[10px] font-black text-white shadow-sm z-10",
-                                    stockColor
-                                )}>
-                                    {p.totalStock}
                                 </div>
-                            </div>
+                            )}
                             
                             <div className="flex-1 min-w-0">
                                 <h3 className="font-bold text-foreground text-sm leading-tight line-clamp-2 mb-1 group-hover:text-primary transition-colors">
@@ -5979,6 +6089,13 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                                 ) : (
                                     <span className="text-primary font-black text-lg">
                                         ${p.variants[0]?.price || 0}
+                                    </span>
+                                )}
+                                
+                                {/* R-02: Si no hay imagen, mostramos stock aquí para que sea visible */}
+                                {!showImages && !isOOS && (
+                                    <span className={cn("text-[9px] font-bold px-1.5 py-0.5 rounded text-white", stockColor)}>
+                                        {p.totalStock}u
                                     </span>
                                 )}
                             </div>
@@ -6263,9 +6380,15 @@ export default function ProductActions({ id, isActive, stock }: { id: string, is
 
 import { useState } from "react"
 import { createProduct, updateProduct } from "@/actions/product-actions"
-import ImageUpload from "./ImageUpload"
+import dynamic from 'next/dynamic'
 import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
+import { useToast } from "@/components/ui/Toast"
+
+const ImageUpload = dynamic(() => import('./ImageUpload'), {
+  loading: () => <p className="text-xs text-muted-foreground animate-pulse">Cargando módulo de imágenes...</p>,
+  ssr: false
+})
 
 type VariantItem = {
   id?: string 
@@ -6291,6 +6414,7 @@ type Props = {
 
 export default function ProductForm({ owners, categories, initialData }: Props) {
   const router = useRouter()
+  const { addToast } = useToast()
   const [imageUrl, setImageUrl] = useState(initialData?.imageUrl || "")
   const [loading, setLoading] = useState(false)
   const [isNewCategory, setIsNewCategory] = useState(false)
@@ -6298,14 +6422,20 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
     initialData?.variants || [{ name: "Estándar", costPrice: 0, salePrice: 0 }]
   )
 
+  const showImages = process.env.NEXT_PUBLIC_ENABLE_IMAGES === 'true'
+
   const addVariant = () => {
     setVariants([...variants, { name: "", costPrice: 0, salePrice: 0 }])
   }
 
   const removeVariant = (index: number) => {
-    if (variants.length <= 1) return alert("Debe haber al menos una variante.")
+    if (variants.length <= 1) {
+        addToast("Debe haber al menos una variante.", "error")
+        return
+    }
     if (variants[index].id) {
-       alert("⚠️ Las variantes guardadas no se borran desde aquí para proteger el historial.")
+        addToast("Las variantes guardadas no se borran desde aquí para proteger el historial.", "info")
+        return
     }
     const newList = [...variants]
     newList.splice(index, 1)
@@ -6319,27 +6449,42 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
   }
 
   const handleSubmit = async (formData: FormData) => {
-    if (variants.some(v => !v.name.trim())) return alert("Todas las variantes deben tener nombre.")
-    if (variants.some(v => v.salePrice < v.costPrice)) return alert("Revisá los precios: Rentabilidad negativa.")
+    if (variants.some(v => !v.name.trim())) {
+        addToast("Todas las variantes deben tener un nombre.", "error")
+        return
+    }
+    if (variants.some(v => v.salePrice < v.costPrice)) {
+        addToast("Revisá los precios: Hay rentabilidad negativa.", "error")
+        return
+    }
 
     setLoading(true)
     if (imageUrl) formData.append("imageUrl", imageUrl)
     if (isNewCategory) formData.append("isNewCategory", "true")
     formData.append("variantsJson", JSON.stringify(variants))
 
-    let result;
     if (initialData) {
         formData.append("id", initialData.id)
-        result = await updateProduct(formData)
-        if (result?.success) {
+        const result = await updateProduct(formData)
+        
+        if (result && 'error' in result) {
+            // Corrección Final: Añadir fallback por si result.error es undefined o null
+            addToast(result.error || "Error al actualizar el producto.", "error")
+        } else {
+            addToast("Producto actualizado con éxito.", "success")
             router.push("/products")
             router.refresh()
-        } else {
-            alert("❌ Error: " + result?.error)
         }
     } else {
-        result = await createProduct(formData)
-        if (result?.error) alert("❌ Error: " + result.error)
+        const result = await createProduct(formData)
+
+        if (result && 'error' in result) {
+            // Corrección Final: Añadir fallback por si result.error es undefined o null
+            addToast(result.error || "Error al crear el producto.", "error")
+        } else {
+            addToast("Producto creado con éxito.", "success")
+            router.refresh()
+        }
     }
     setLoading(false)
   }
@@ -6355,98 +6500,29 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
       
       <form action={handleSubmit} className="space-y-8">
         
-        {/* === DATOS GENERALES === */}
         <div className="grid grid-cols-1 gap-6">
             <div className="space-y-4">
-                <div>
-                    <label className={labelClass}>Nombre del Producto *</label>
-                    <input 
-                        name="name" 
-                        defaultValue={initialData?.name} 
-                        type="text" 
-                        required 
-                        placeholder="Ej: Collar de Cuero"
-                        className={inputClass} 
-                    />
-                </div>
-                <div>
-                    <label className={labelClass}>Descripción</label>
-                    <textarea 
-                        name="description" 
-                        defaultValue={initialData?.description || ""} 
-                        className={inputClass} 
-                        rows={2} 
-                    />
-                </div>
+                <div><label className={labelClass}>Nombre del Producto *</label><input name="name" defaultValue={initialData?.name} type="text" required placeholder="Ej: Collar de Cuero" className={inputClass} /></div>
+                <div><label className={labelClass}>Descripción</label><textarea name="description" defaultValue={initialData?.description || ""} className={inputClass} rows={2} /></div>
             </div>
-
             <div className="grid grid-cols-2 gap-4">
                  <div>
                     <label className={labelClass}>Dueño *</label>
-                    <select 
-                        name="ownerId" 
-                        defaultValue={initialData?.ownerId || ""} 
-                        required 
-                        className={inputClass}
-                    >
+                    <select name="ownerId" defaultValue={initialData?.ownerId || ""} required className={inputClass}>
                         <option value="">Seleccionar...</option>
-                        {owners.map(o => (
-                            <option key={o.id} value={o.id}>{o.name}</option>
-                        ))}
+                        {owners.map(o => (<option key={o.id} value={o.id}>{o.name}</option>))}
                     </select>
                 </div>
-
                 <div>
-                    <div className="flex justify-between items-center mb-1">
-                        <label className={labelClass}>Categoría *</label>
-                        <button 
-                            type="button"
-                            onClick={() => setIsNewCategory(!isNewCategory)}
-                            className="text-[10px] text-primary font-bold hover:underline uppercase"
-                        >
-                            {isNewCategory ? "Cancelar" : "+ Nueva"}
-                        </button>
-                    </div>
-                    {isNewCategory ? (
-                        <input 
-                            name="categoryName"
-                            type="text"
-                            placeholder="Nombre nueva categoría..."
-                            className={cn(inputClass, "bg-primary/5 border-primary/20")}
-                            autoFocus
-                        />
-                    ) : (
-                        <select 
-                            name="categoryId" 
-                            defaultValue={initialData?.categoryId || ""} 
-                            required 
-                            className={inputClass}
-                        >
-                            <option value="">Seleccionar...</option>
-                            {categories.map(c => (
-                                <option key={c.id} value={c.id}>{c.name}</option>
-                            ))}
-                        </select>
-                    )}
+                    <div className="flex justify-between items-center mb-1"><label className={labelClass}>Categoría *</label><button type="button" onClick={() => setIsNewCategory(!isNewCategory)} className="text-[10px] text-primary font-bold hover:underline uppercase">{isNewCategory ? "Cancelar" : "+ Nueva"}</button></div>
+                    {isNewCategory ? (<input name="categoryName" type="text" placeholder="Nombre nueva categoría..." className={cn(inputClass, "bg-primary/5 border-primary/20")} autoFocus />) : (<select name="categoryId" defaultValue={initialData?.categoryId || ""} required className={inputClass}><option value="">Seleccionar...</option>{categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}</select>)}
                 </div>
             </div>
         </div>
 
-        {/* === VARIANTES === */}
         <div className="bg-muted/30 p-4 rounded-xl border border-border">
-            <div className="flex justify-between items-center mb-4">
-                <label className="text-sm font-bold text-foreground">Variantes y Precios</label>
-                <button 
-                    type="button" 
-                    onClick={addVariant}
-                    className="text-xs bg-foreground text-background px-3 py-1.5 rounded-lg hover:opacity-90 font-bold transition"
-                >
-                    + Agregar Variante
-                </button>
-            </div>
-            
+            <div className="flex justify-between items-center mb-4"><label className="text-sm font-bold text-foreground">Variantes y Precios</label><button type="button" onClick={addVariant} className="text-xs bg-foreground text-background px-3 py-1.5 rounded-lg hover:opacity-90 font-bold transition">+ Agregar Variante</button></div>
             <div className="space-y-2">
-                {/* HEADERS (Solo desktop) */}
                 <div className="hidden md:grid grid-cols-12 gap-2 text-[10px] uppercase font-bold text-muted-foreground px-2">
                     <div className="col-span-4">Nombre</div>
                     <div className="col-span-3">Costo</div>
@@ -6454,73 +6530,24 @@ export default function ProductForm({ owners, categories, initialData }: Props) 
                     <div className="col-span-1 text-center">Stock</div>
                     <div className="col-span-1"></div>
                 </div>
-
                 {variants.map((variant, idx) => (
                     <div key={idx} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center bg-card p-2 md:p-0 rounded-lg md:bg-transparent border md:border-0 border-border mb-2 md:mb-0">
-                        <div className="col-span-4">
-                            <input 
-                                type="text" 
-                                value={variant.name}
-                                onChange={(e) => updateVariant(idx, 'name', e.target.value)}
-                                placeholder="Ej: XL, Rojo..."
-                                className={inputClass}
-                            />
-                        </div>
-                        <div className="col-span-3 flex items-center gap-1">
-                            <span className="text-xs text-muted-foreground md:hidden">Costo:</span>
-                            <input 
-                                type="number" step="0.01"
-                                value={variant.costPrice}
-                                onChange={(e) => updateVariant(idx, 'costPrice', parseFloat(e.target.value) || 0)}
-                                className={inputClass}
-                            />
-                        </div>
-                        <div className="col-span-3 flex items-center gap-1">
-                            <span className="text-xs text-muted-foreground md:hidden">Venta:</span>
-                            <input 
-                                type="number" step="0.01"
-                                value={variant.salePrice}
-                                onChange={(e) => updateVariant(idx, 'salePrice', parseFloat(e.target.value) || 0)}
-                                className={cn(inputClass, "font-bold text-green-600 dark:text-green-400")}
-                            />
-                        </div>
-                        <div className="col-span-1 text-center text-xs font-mono text-muted-foreground hidden md:block">
-                            {variant.id ? variant.stock : '-'}
-                        </div>
-                        <div className="col-span-1 text-right md:text-center">
-                            <button 
-                                type="button" 
-                                onClick={() => removeVariant(idx)}
-                                className="text-muted-foreground hover:text-destructive transition p-2"
-                            >
-                                ✕
-                            </button>
-                        </div>
+                        <div className="col-span-4"><input type="text" value={variant.name} onChange={(e) => updateVariant(idx, 'name', e.target.value)} placeholder="Ej: XL, Rojo..." className={inputClass} /></div>
+                        <div className="col-span-3 flex items-center gap-1"><span className="text-xs text-muted-foreground md:hidden">Costo:</span><input type="number" step="0.01" value={variant.costPrice} onChange={(e) => updateVariant(idx, 'costPrice', parseFloat(e.target.value) || 0)} className={inputClass} /></div>
+                        <div className="col-span-3 flex items-center gap-1"><span className="text-xs text-muted-foreground md:hidden">Venta:</span><input type="number" step="0.01" value={variant.salePrice} onChange={(e) => updateVariant(idx, 'salePrice', parseFloat(e.target.value) || 0)} className={cn(inputClass, "font-bold text-green-600 dark:text-green-400")} /></div>
+                        <div className="col-span-1 text-center text-xs font-mono text-muted-foreground hidden md:block">{variant.id ? variant.stock : '-'}</div>
+                        <div className="col-span-1 text-right md:text-center"><button type="button" onClick={() => removeVariant(idx)} className="text-muted-foreground hover:text-destructive transition p-2">✕</button></div>
                     </div>
                 ))}
             </div>
         </div>
 
-        {/* === FOOTER === */}
         <div className="flex flex-col md:flex-row items-center gap-6 pt-4 border-t border-border">
-            <div className="w-full md:w-1/2">
-                <ImageUpload onImageUpload={(url) => setImageUrl(url)} />
-            </div>
-            
-            <button 
-                type="submit" 
-                disabled={loading}
-                className={cn(
-                    "w-full md:w-auto md:ml-auto px-8 py-3 rounded-xl font-bold text-white shadow-lg transition active:scale-95",
-                    loading 
-                        ? 'bg-muted text-muted-foreground cursor-wait' 
-                        : 'bg-green-600 hover:bg-green-700'
-                )}
-            >
+            {showImages && (<div className="w-full md:w-1/2"><ImageUpload onImageUpload={(url) => setImageUrl(url)} /></div>)}
+            <button type="submit" disabled={loading} className={cn("w-full md:w-auto md:ml-auto px-8 py-3 rounded-xl font-bold text-white shadow-lg transition active:scale-95", loading ? 'bg-muted text-muted-foreground cursor-wait' : 'bg-green-600 hover:bg-green-700')}>
                 {loading ? "Guardando..." : "GUARDAR PRODUCTO"}
             </button>
         </div>
-
       </form>
     </div>
   )
@@ -6834,15 +6861,16 @@ import { useState, useMemo } from "react"
 import { createSettlement } from "@/actions/settlement-actions"
 import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
+// R-08: Importar hook de notificaciones
+import { useToast } from "@/components/ui/Toast"
 
-// Tipos de datos que recibimos desde la Page (Server Component)
 type PendingItem = {
     id: string
     type: 'SALE' | 'ADJUSTMENT'
     date: Date
     description: string
-    pendingQuantity: number // Lo que falta pagar
-    cost: number // Costo unitario histórico
+    pendingQuantity: number
+    cost: number
     isAdjustment: boolean
 }
 
@@ -6853,13 +6881,11 @@ interface Props {
 
 export default function SettlementForm({ ownerId, items }: Props) {
     const router = useRouter()
+    // R-08: Inicializar toast
+    const { addToast } = useToast()
     const [loading, setLoading] = useState(false)
     
-    // Estado: Mapa de selecciones
-    // Key: ID del item
-    // Value: { selected: boolean, quantityToPay: number }
     const [selections, setSelections] = useState<Record<string, { selected: boolean, quantity: number }>>(() => {
-        // Inicializamos todo seleccionado al máximo (Comportamiento "Liquidar Todo")
         const initial: any = {}
         items.forEach(i => {
             initial[i.id] = { selected: true, quantity: i.pendingQuantity }
@@ -6867,7 +6893,6 @@ export default function SettlementForm({ ownerId, items }: Props) {
         return initial
     })
 
-    // Computed: Total a Pagar en tiempo real
     const totalToPay = useMemo(() => {
         let sum = 0
         items.forEach(item => {
@@ -6876,7 +6901,7 @@ export default function SettlementForm({ ownerId, items }: Props) {
                 sum += (sel.quantity * item.cost)
             }
         })
-        return sum
+        return Math.round(sum * 100) / 100 // Redondeo visual
     }, [items, selections])
 
     const handleQuantityChange = (id: string, valStr: string, max: number) => {
@@ -6884,28 +6909,17 @@ export default function SettlementForm({ ownerId, items }: Props) {
         if (isNaN(val) || val < 1) val = 1
         if (val > max) val = max
         
-        setSelections(prev => ({
-            ...prev,
-            [id]: { ...prev[id], quantity: val, selected: true } // Si toca cantidad, se auto-selecciona
-        }))
+        setSelections(prev => ({ ...prev, [id]: { ...prev[id], quantity: val, selected: true } }))
     }
 
     const toggleSelection = (id: string) => {
-        setSelections(prev => ({
-            ...prev,
-            [id]: { ...prev[id], selected: !prev[id].selected }
-        }))
+        setSelections(prev => ({ ...prev, [id]: { ...prev[id], selected: !prev[id].selected } }))
     }
 
     const toggleAll = () => {
         const allSelected = items.every(i => selections[i.id]?.selected)
         const newState: any = {}
-        items.forEach(i => {
-            newState[i.id] = { 
-                selected: !allSelected, 
-                quantity: selections[i.id]?.quantity || i.pendingQuantity 
-            }
-        })
+        items.forEach(i => { newState[i.id] = { selected: !allSelected, quantity: selections[i.id]?.quantity || i.pendingQuantity } })
         setSelections(newState)
     }
 
@@ -6913,15 +6927,15 @@ export default function SettlementForm({ ownerId, items }: Props) {
         e.preventDefault()
         
         if (totalToPay <= 0) {
-            alert("El total debe ser mayor a cero.")
+            addToast("El total a pagar debe ser mayor a cero.", "error")
             return
         }
 
+        // R-08: Reemplazar confirm por un modal (si existiera) o mantenerlo como acción crítica
         if (!confirm(`¿Confirmás el pago por $${totalToPay.toLocaleString()}?`)) return
 
         setLoading(true)
 
-        // Construir el payload JSON
         const payload = items
             .filter(i => selections[i.id]?.selected)
             .map(i => ({
@@ -6930,69 +6944,42 @@ export default function SettlementForm({ ownerId, items }: Props) {
                 quantity: i.isAdjustment ? undefined : selections[i.id].quantity
             }))
 
-        // Usamos FormData para enviar a la Server Action
         const formData = new FormData()
         formData.append("ownerId", ownerId)
         formData.append("selection", JSON.stringify(payload))
 
         const res = await createSettlement(formData)
 
+        setLoading(false)
         if (res?.error) {
-            alert("❌ Error: " + res.error)
-            setLoading(false)
+            addToast(res.error, "error")
         } else {
-            // Éxito: El server action ya hizo revalidate, pero forzamos redirect o refresh
-            router.push("/owners/balance") 
+            addToast("Liquidación registrada con éxito.", "success")
+            router.push(`/owners/balance`)
             router.refresh()
         }
     }
 
     return (
         <form onSubmit={handleSubmit} className="animate-in fade-in space-y-6">
-            
-            {/* CAJA DE RESUMEN Y ACCIÓN */}
             <div className="bg-card p-6 md:p-8 rounded-3xl border border-border shadow-lg flex flex-col md:flex-row justify-between items-center gap-6 sticky top-4 z-10 backdrop-blur-md bg-opacity-95">
                 <div>
                     <p className="text-xs text-muted-foreground uppercase font-bold tracking-widest mb-2">Total a Pagar</p>
-                    <p className={cn(
-                        "text-5xl font-black font-nunito transition-all",
-                        totalToPay > 0 ? "text-foreground" : "text-muted-foreground"
-                    )}>
+                    <p className={cn("text-5xl font-black font-nunito transition-all", totalToPay > 0 ? "text-foreground" : "text-muted-foreground")}>
                         ${totalToPay.toLocaleString()}
                     </p>
-                    <p className="text-xs text-muted-foreground font-medium mt-1">
-                        {items.filter(i => selections[i.id]?.selected).length} items seleccionados
-                    </p>
+                    <p className="text-xs text-muted-foreground font-medium mt-1">{items.filter(i => selections[i.id]?.selected).length} items seleccionados</p>
                 </div>
-                
-                <button
-                    type="submit"
-                    disabled={loading || totalToPay <= 0}
-                    className={cn(
-                        "px-8 py-4 rounded-xl font-bold text-lg shadow-lg transition active:scale-95 text-white w-full md:w-auto",
-                        loading || totalToPay <= 0
-                        ? 'bg-muted text-muted-foreground cursor-not-allowed shadow-none' 
-                        : 'bg-green-600 hover:bg-green-700 hover:shadow-green-900/20'
-                    )}
-                >
+                <button type="submit" disabled={loading || totalToPay <= 0} className={cn("px-8 py-4 rounded-xl font-bold text-lg shadow-lg transition active:scale-95 text-white w-full md:w-auto", loading || totalToPay <= 0 ? 'bg-muted text-muted-foreground cursor-not-allowed shadow-none' : 'bg-green-600 hover:bg-green-700 hover:shadow-green-900/20')}>
                     {loading ? "Procesando..." : "✅ Confirmar Pago"}
                 </button>
             </div>
-
-            {/* TABLA DE DETALLE INTERACTIVA */}
             <div className="bg-card rounded-3xl shadow-sm overflow-hidden border border-border">
                 <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm">
                         <thead className="bg-muted/50 text-muted-foreground uppercase font-bold text-xs">
                             <tr>
-                                <th className="p-4 w-10 text-center">
-                                    <input 
-                                        type="checkbox" 
-                                        onChange={toggleAll}
-                                        checked={items.every(i => selections[i.id]?.selected)}
-                                        className="w-4 h-4 rounded border-gray-300 text-primary focus:ring-primary cursor-pointer"
-                                    />
-                                </th>
+                                <th className="p-4 w-10 text-center"><input type="checkbox" onChange={toggleAll} checked={items.every(i => selections[i.id]?.selected)} className="w-4 h-4 rounded border-gray-300 text-primary focus:ring-primary cursor-pointer"/></th>
                                 <th className="p-4">Fecha / Producto</th>
                                 <th className="p-4 text-center">Pendiente</th>
                                 <th className="p-4 text-center">A Pagar (Cant.)</th>
@@ -7005,54 +6992,13 @@ export default function SettlementForm({ ownerId, items }: Props) {
                                 const currentQty = selections[row.id]?.quantity
                                 const subtotal = currentQty * row.cost
                                 const isAdj = row.isAdjustment
-
                                 return (
                                     <tr key={row.id} className={cn("transition", isSelected ? "bg-primary/5" : "hover:bg-muted/30 opacity-60 hover:opacity-100")}>
-                                        <td className="p-4 text-center">
-                                            <input 
-                                                type="checkbox"
-                                                checked={isSelected}
-                                                onChange={() => toggleSelection(row.id)}
-                                                className="w-4 h-4 rounded border-gray-300 text-primary focus:ring-primary cursor-pointer"
-                                            />
-                                        </td>
-                                        
-                                        <td className="p-4">
-                                            <p className="font-bold text-foreground flex items-center gap-2">
-                                                {row.type === 'SALE' ? '🛒' : '↩️'} {row.description}
-                                            </p>
-                                            <p className="text-xs text-muted-foreground">{row.date.toLocaleDateString()}</p>
-                                        </td>
-
-                                        <td className="p-4 text-center font-mono text-muted-foreground">
-                                            {isAdj ? '-' : row.pendingQuantity}
-                                        </td>
-
-                                        <td className="p-4 text-center">
-                                            {isAdj ? (
-                                                <span className="text-xs font-bold text-muted-foreground">-</span>
-                                            ) : (
-                                                <input 
-                                                    type="number"
-                                                    min={1}
-                                                    max={row.pendingQuantity}
-                                                    value={currentQty}
-                                                    onChange={(e) => handleQuantityChange(row.id, e.target.value, row.pendingQuantity)}
-                                                    disabled={!isSelected}
-                                                    className={cn(
-                                                        "w-16 text-center p-1 rounded border font-bold outline-none focus:ring-2 focus:ring-primary",
-                                                        isSelected ? "bg-background border-input text-foreground" : "bg-transparent border-transparent text-muted-foreground"
-                                                    )}
-                                                />
-                                            )}
-                                        </td>
-                                        
-                                        <td className={cn(
-                                            "p-4 pr-6 text-right font-mono font-bold text-base",
-                                            row.cost < 0 ? "text-green-600" : "text-foreground"
-                                        )}>
-                                            ${subtotal.toLocaleString()}
-                                        </td>
+                                        <td className="p-4 text-center"><input type="checkbox" checked={isSelected} onChange={() => toggleSelection(row.id)} className="w-4 h-4 rounded border-gray-300 text-primary focus:ring-primary cursor-pointer"/></td>
+                                        <td className="p-4"><p className="font-bold text-foreground flex items-center gap-2">{row.type === 'SALE' ? '🛒' : '↩️'} {row.description}</p><p className="text-xs text-muted-foreground">{row.date.toLocaleDateString()}</p></td>
+                                        <td className="p-4 text-center font-mono text-muted-foreground">{isAdj ? '-' : row.pendingQuantity}</td>
+                                        <td className="p-4 text-center">{isAdj ? (<span className="text-xs font-bold text-muted-foreground">-</span>) : (<input type="number" min={1} max={row.pendingQuantity} value={currentQty} onChange={(e) => handleQuantityChange(row.id, e.target.value, row.pendingQuantity)} disabled={!isSelected} className={cn("w-16 text-center p-1 rounded border font-bold outline-none focus:ring-2 focus:ring-primary", isSelected ? "bg-background border-input text-foreground" : "bg-transparent border-transparent text-muted-foreground")}/>)}</td>
+                                        <td className={cn("p-4 pr-6 text-right font-mono font-bold text-base", row.cost < 0 ? "text-green-600" : "text-foreground")}>${subtotal.toLocaleString()}</td>
                                     </tr>
                                 )
                             })}

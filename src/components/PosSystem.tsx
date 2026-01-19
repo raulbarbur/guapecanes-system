@@ -1,10 +1,12 @@
-// src/components/PosSystem.tsx
 'use client'
 
 import Image from "next/image"
+import { useState } from "react"
 import TicketView from "./TicketView"
 import { usePos, ProductGroupType, CustomerOption } from "@/hooks/usePos"
 import { cn } from "@/lib/utils"
+import { createCustomer } from "@/actions/customer-actions"
+import { useToast } from "@/components/ui/Toast"
 
 export default function PosSystem({ products, customers }: { products: ProductGroupType[], customers: CustomerOption[] }) {
   const {
@@ -14,13 +16,41 @@ export default function PosSystem({ products, customers }: { products: ProductGr
     handleProductClick, addVariantToCart, removeFromCart, updateServicePrice, checkout
   } = usePos(products, customers)
 
-  // R-02: Feature Flag para imágenes
+  const { addToast } = useToast()
+  
+  const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false)
+  const [creatingCustomer, setCreatingCustomer] = useState(false)
+
   const showImages = process.env.NEXT_PUBLIC_ENABLE_IMAGES === 'true'
 
-  // NUEVO: RENDERIZADO CONDICIONAL POR MÉTODO
+  // --- HANDLER ALTA RÁPIDA (MODIFICADO) ---
+  const handleQuickCustomerCreate = async (formData: FormData) => {
+    setCreatingCustomer(true)
+    
+    // Llamamos a la acción
+    const result = await createCustomer(formData) 
+    
+    setCreatingCustomer(false)
+
+    if (result?.success) {
+        addToast("✅ Cliente creado y seleccionado.", "success")
+        setIsCustomerModalOpen(false)
+        
+        // ✨ MAGIA: Si viene el cliente nuevo, lo seleccionamos inmediatamente
+        // Next.js refrescará las props 'customers' en segundo plano, 
+        // pero el ID ya será válido para el estado local.
+        if (result.customer) {
+            setSelectedCustomerId(result.customer.id)
+        }
+    } else {
+        addToast(result?.error || "Error al crear cliente", "error")
+    }
+  }
+
+  // ... (El resto del componente sigue idéntico, solo cambió handleQuickCustomerCreate)
+  // ... RENDERIZADO DEL TICKET ...
   if (lastSale) {
     if (lastSale.method === 'CHECKING_ACCOUNT') {
-        // Vista simplificada para Fiado (Sin Ticket Fiscal)
         return (
             <div className="flex flex-col items-center justify-center h-full p-4 animate-in zoom-in-95 duration-300">
                 <div className="bg-card p-10 rounded-3xl shadow-xl border border-border text-center max-w-md w-full">
@@ -29,7 +59,6 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                     <p className="text-muted-foreground font-medium mb-6">
                         Se registraron los ítems en la cuenta del cliente correctamente.
                     </p>
-                    
                     <button 
                         onClick={clearLastSale}
                         className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-bold py-4 rounded-xl shadow-lg transition active:scale-95"
@@ -41,7 +70,6 @@ export default function PosSystem({ products, customers }: { products: ProductGr
         )
     }
 
-    // Vista normal (Ticket) para Cash/Transfer
     return (
         <TicketView 
             mode="POS"
@@ -133,7 +161,6 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                                     : "bg-card border-border hover:border-primary hover:shadow-lg hover:shadow-primary/10 hover:-translate-y-1"
                             )}
                         >
-                            {/* R-02: Renderizado Condicional de la Imagen */}
                             {showImages && (
                                 <div className="w-full aspect-square bg-muted rounded-xl overflow-hidden relative mb-3">
                                     {p.imageUrl ? (
@@ -178,7 +205,6 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                                     </span>
                                 )}
                                 
-                                {/* R-02: Si no hay imagen, mostramos stock aquí para que sea visible */}
                                 {!showImages && !isOOS && (
                                     <span className={cn("text-[9px] font-bold px-1.5 py-0.5 rounded text-white", stockColor)}>
                                         {p.totalStock}u
@@ -206,21 +232,31 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                 </span>
             </div>
             
-            <select 
-                value={selectedCustomerId}
-                onChange={(e) => setSelectedCustomerId(e.target.value)}
-                className={cn(
-                    "w-full p-2.5 rounded-xl text-sm font-bold border transition outline-none cursor-pointer appearance-none",
-                    selectedCustomerId 
-                        ? "bg-primary/10 border-primary text-primary" 
-                        : "bg-background border-input text-muted-foreground"
-                )}
-            >
-                <option value="">👤 Cliente Final (Anónimo)</option>
-                {customers.map(c => (
-                    <option key={c.id} value={c.id}>👤 {c.name}</option>
-                ))}
-            </select>
+            <div className="flex gap-2">
+                <select 
+                    value={selectedCustomerId}
+                    onChange={(e) => setSelectedCustomerId(e.target.value)}
+                    className={cn(
+                        "flex-1 p-2.5 rounded-xl text-sm font-bold border transition outline-none cursor-pointer appearance-none",
+                        selectedCustomerId 
+                            ? "bg-primary/10 border-primary text-primary" 
+                            : "bg-background border-input text-muted-foreground"
+                    )}
+                >
+                    <option value="">👤 Cliente Final (Anónimo)</option>
+                    {customers.map(c => (
+                        <option key={c.id} value={c.id}>👤 {c.name}</option>
+                    ))}
+                </select>
+                
+                <button 
+                    onClick={() => setIsCustomerModalOpen(true)}
+                    className="w-10 h-10 flex items-center justify-center rounded-xl bg-secondary hover:bg-primary hover:text-primary-foreground border border-border transition text-lg font-black"
+                    title="Nuevo Cliente"
+                >
+                    +
+                </button>
+            </div>
           </div>
           
           <div className="p-4 space-y-3 flex-1 overflow-y-auto custom-scrollbar">
@@ -397,6 +433,56 @@ export default function PosSystem({ products, customers }: { products: ProductGr
                     })}
                 </div>
             </div>
+        </div>
+    )}
+
+    {isCustomerModalOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+             <div className="bg-card rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden border border-border animate-in zoom-in-95">
+                <div className="p-5 border-b border-border flex justify-between items-center bg-muted/30">
+                    <h3 className="font-black text-lg text-foreground font-nunito">👤 Nuevo Cliente</h3>
+                    <button 
+                        onClick={() => setIsCustomerModalOpen(false)} 
+                        className="w-8 h-8 rounded-full bg-border flex items-center justify-center text-muted-foreground hover:bg-input transition"
+                    >
+                        ✕
+                    </button>
+                </div>
+                
+                <form action={handleQuickCustomerCreate} className="p-6 flex flex-col gap-4">
+                    <div className="space-y-1">
+                        <label className="text-xs font-bold text-muted-foreground uppercase">Nombre Completo *</label>
+                        <input 
+                            name="name" 
+                            type="text" 
+                            required 
+                            autoFocus
+                            placeholder="Ej: Juan Perez"
+                            className="w-full bg-background border border-input p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-primary"
+                        />
+                    </div>
+                    <div className="space-y-1">
+                        <label className="text-xs font-bold text-muted-foreground uppercase">Teléfono</label>
+                        <input 
+                            name="phone" 
+                            type="text" 
+                            placeholder="Opcional"
+                            className="w-full bg-background border border-input p-3 rounded-xl text-sm outline-none focus:ring-2 focus:ring-primary"
+                        />
+                    </div>
+
+                    <button 
+                        type="submit" 
+                        disabled={creatingCustomer}
+                        className={cn(
+                            "w-full py-3 rounded-xl font-bold text-primary-foreground transition mt-2",
+                            creatingCustomer ? 'bg-muted text-muted-foreground' : 'bg-primary hover:bg-primary/90'
+                        )}
+                    >
+                        {creatingCustomer ? "Guardando..." : "Crear Cliente"}
+                    </button>
+                </form>
+             </div>
         </div>
     )}
     </>
