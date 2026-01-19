@@ -1,12 +1,10 @@
-// src/hooks/usePos.ts
 'use client'
 
-import { useState, useMemo, useEffect, useCallback } from "react"
+import { useState, useMemo, useEffect, useCallback, useRef } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { processSale } from "@/actions/sale-actions"
 import { useToast } from "@/components/ui/Toast"
 
-// --- TIPOS ---
 export type VariantType = {
   id: string
   name: string
@@ -24,7 +22,6 @@ export type ProductGroupType = {
   variants: VariantType[]
 }
 
-// NUEVO TIPO PARA CLIENTES
 export type CustomerOption = {
   id: string
   name: string
@@ -39,7 +36,7 @@ export type CartItem = {
   stockMax?: number
 }
 
-type PaymentMethod = "CASH" | "TRANSFER" | "CHECKING_ACCOUNT" // 👈 Agregamos Cta Cte
+type PaymentMethod = "CASH" | "TRANSFER" | "CHECKING_ACCOUNT"
 
 type SaleResult = {
     id: string
@@ -54,32 +51,33 @@ export function usePos(products: ProductGroupType[], customers: CustomerOption[]
   const router = useRouter()
   const searchParams = useSearchParams()
 
-  // --- ESTADOS ---
   const [cart, setCart] = useState<CartItem[]>([])
   const [loading, setLoading] = useState(false)
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH")
   const [lastSale, setLastSale] = useState<SaleResult | null>(null)
-  
-  // NUEVO ESTADO: CLIENTE SELECCIONADO
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>("")
 
-  // Filtros
   const [search, setSearch] = useState("")
   const [selectedCategory, setSelectedCategory] = useState<string | "ALL">("ALL")
-
-  // Modal
   const [selectedProductForModal, setSelectedProductForModal] = useState<ProductGroupType | null>(null)
 
-  // --- EFECTOS (Carga de Servicios desde Agenda) ---
+  // FIX: Usamos un ref para evitar loop infinito de useEffect si agregamos dependencias
+  const processedParamsRef = useRef(false)
+
+  // --- EFECTO: Carga de Servicios desde URL ---
   useEffect(() => {
     const apptId = searchParams.get("apptId")
     const petName = searchParams.get("petName")
     
-    if (apptId && petName) {
+    // Solo ejecutar si no se ha procesado ya para evitar re-renders y loops
+    if (apptId && petName && !processedParamsRef.current) {
+       processedParamsRef.current = true
+       
        setCart(current => {
-         const exists = current.some(i => i.id === apptId && i.type === 'SERVICE')
-         if (exists) return current
-         addToast(`Servicio para ${petName} cargado`, 'info')
+         // Verificación defensiva
+         if (current.some(i => i.id === apptId && i.type === 'SERVICE')) return current
+         
+         // Retornar nuevo estado
          return [{
             type: 'SERVICE',
             id: apptId,
@@ -88,10 +86,14 @@ export function usePos(products: ProductGroupType[], customers: CustomerOption[]
             quantity: 1
          }, ...current]
        })
+
+       // FIX: Sacamos el Toast del flujo de renderizado usando setTimeout
+       setTimeout(() => {
+           addToast(`Servicio para ${petName} cargado`, 'info')
+       }, 100)
     }
   }, [searchParams, addToast])
 
-  // --- LÓGICA FILTROS ---
   const categories = useMemo(() => {
     const cats = products.map(p => p.categoryName)
     return ["ALL", ...Array.from(new Set(cats))].sort()
@@ -109,7 +111,6 @@ export function usePos(products: ProductGroupType[], customers: CustomerOption[]
     })
   }, [products, search, selectedCategory])
 
-  // --- LÓGICA CARRITO ---
   const addVariantToCart = useCallback((productName: string, variant: VariantType) => {
     if (variant.stock <= 0) {
         addToast(`Sin stock para ${variant.name}`, 'error')
@@ -122,7 +123,8 @@ export function usePos(products: ProductGroupType[], customers: CustomerOption[]
         if (existingIndex >= 0) {
             const existingItem = current[existingIndex]
             if (existingItem.quantity >= variant.stock) {
-                addToast("Stock máximo alcanzado", 'error')
+                // FIX: Toast asíncrono
+                setTimeout(() => addToast("Stock máximo alcanzado", 'error'), 0)
                 return current
             }
             const newCart = [...current]
@@ -165,13 +167,11 @@ export function usePos(products: ProductGroupType[], customers: CustomerOption[]
     setCart(current => current.map((item, i) => i === index ? { ...item, price: isNaN(val) ? 0 : val } : item))
   }, [])
 
-  // --- CHECKOUT ---
   const total = useMemo(() => cart.reduce((sum, item) => sum + (item.price * item.quantity), 0), [cart])
 
   const checkout = async () => {
     if (total === 0 && !confirm("¿Confirmar venta por $0?")) return
     
-    // VALIDACIÓN NUEVA: Si es Fiado, debe haber cliente
     if (paymentMethod === 'CHECKING_ACCOUNT' && !selectedCustomerId) {
         addToast("⚠️ Seleccioná un cliente para fiar.", 'error')
         return
@@ -187,7 +187,6 @@ export function usePos(products: ProductGroupType[], customers: CustomerOption[]
         quantity: item.quantity 
     }))
     
-    // Pasamos el selectedCustomerId (puede ser string vacío si no se eligió, que es válido para CASH)
     const result = await processSale(payload, total, paymentMethod, selectedCustomerId || undefined)
     
     setLoading(false)
@@ -202,8 +201,8 @@ export function usePos(products: ProductGroupType[], customers: CustomerOption[]
         method: paymentMethod
       })
       setCart([]) 
-      setSelectedCustomerId("") // Reset cliente
-      setPaymentMethod("CASH") // Reset método
+      setSelectedCustomerId("")
+      setPaymentMethod("CASH")
 
       if (searchParams.get("apptId")) {
           router.replace("/pos") 
@@ -220,14 +219,9 @@ export function usePos(products: ProductGroupType[], customers: CustomerOption[]
   return {
     cart, total, loading, paymentMethod, lastSale,
     search, selectedCategory, categories, filteredProducts, selectedProductForModal,
-    
-    // NUEVO RETURN
     selectedCustomerId,
-    
     setPaymentMethod, setSearch, setSelectedCategory, setSelectedProductForModal, clearLastSale,
-    // NUEVO SETTER
     setSelectedCustomerId,
-
     handleProductClick, addVariantToCart, removeFromCart, updateServicePrice, checkout
   }
 }

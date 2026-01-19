@@ -14,7 +14,8 @@ export async function createCustomer(formData: FormData) {
   if (!name) return { error: "El nombre es obligatorio" }
 
   try {
-    await prisma.customer.create({
+    // 1. Guardamos el resultado en una variable
+    const newCustomer = await prisma.customer.create({
       data: {
         name,
         phone: phone || null,
@@ -25,13 +26,16 @@ export async function createCustomer(formData: FormData) {
 
     revalidatePath("/customers")
     revalidatePath("/pos") 
-    return { success: true }
+    
+    // 2. Retornamos el cliente creado junto con el éxito
+    return { success: true, customer: newCustomer }
 
   } catch (error) {
     console.error("Error creando cliente:", error)
     return { error: "Error interno al crear cliente." }
   }
 }
+
 
 export async function updateCustomer(formData: FormData) {
   const id = formData.get("id") as string
@@ -70,8 +74,6 @@ export async function deleteCustomer(formData: FormData) {
   if (!id) return { error: "ID requerido" }
 
   try {
-    // 1. VERIFICACIÓN DE DEUDA (R-05)
-    // Buscamos específicamente ventas "fiadas" que no han sido pagadas.
     const pendingDebts = await prisma.sale.count({
         where: {
             customerId: id,
@@ -83,9 +85,6 @@ export async function deleteCustomer(formData: FormData) {
         return { error: "⛔ No se puede eliminar: El cliente tiene deuda activa (Fiado). Debe saldarla o anular las ventas antes de borrar." }
     }
 
-    // 2. VERIFICACIÓN DE HISTORIAL GENERAL
-    // Si no tiene deuda pero tiene historial, tampoco borramos (integridad DB),
-    // pero el mensaje es diferente.
     const customerWithHistory = await prisma.customer.findUnique({
         where: { id },
         include: { _count: { select: { sales: true } } }
@@ -95,7 +94,6 @@ export async function deleteCustomer(formData: FormData) {
         return { error: "⛔ No se puede eliminar: El cliente tiene historial de compras asociado." }
     }
 
-    // 3. EJECUCIÓN
     await prisma.customer.delete({ where: { id } })
     
     revalidatePath("/customers")

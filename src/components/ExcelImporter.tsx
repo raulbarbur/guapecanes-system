@@ -1,12 +1,10 @@
-// src/components/ExcelImporter.tsx
 'use client'
 
 import { useState } from "react"
 import readXlsxFile from "read-excel-file"
-// R-03: Importamos la nueva acción por lotes
 import { importProductBatch } from "@/actions/bulk-actions"
+import { cn } from "@/lib/utils"
 
-// Helper para dividir array en chunks
 function chunkArray<T>(array: T[], size: number): T[][] {
   const chunks: T[][] = []
   for (let i = 0; i < array.length; i += size) {
@@ -21,22 +19,18 @@ export default function ExcelImporter() {
   const [progress, setProgress] = useState({ current: 0, total: 0, errors: 0 })
   const [logs, setLogs] = useState<string[]>([])
 
-  // 1. LEER EL ARCHIVO
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
 
-    // R-03: Validación de tamaño (Max 5MB)
     if (file.size > 5 * 1024 * 1024) {
         alert("⚠️ El archivo es demasiado grande. Máximo 5MB.")
-        e.target.value = "" // Reset input
+        e.target.value = "" 
         return
     }
 
     try {
       const data = await readXlsxFile(file)
-      
-      // Mapeo de columnas
       const cleanData = data.slice(1).map(row => ({
         name: row[0] as string,
         variantName: row[1] as string,
@@ -55,12 +49,10 @@ export default function ExcelImporter() {
     }
   }
 
-  // 2. PROCESAR POR LOTES (BATCHING)
   const startImport = async () => {
     setProcessing(true)
-    setLogs([]) // Limpiar logs anteriores
+    setLogs([]) 
     
-    // R-03: Chunking (Lotes de 20)
     const BATCH_SIZE = 20
     const batches = chunkArray(rows, BATCH_SIZE)
     
@@ -70,27 +62,23 @@ export default function ExcelImporter() {
 
     for (const batch of batches) {
         try {
-            // Llamada al Server Action con el lote completo
             const result = await importProductBatch(batch)
 
             if (result.success) {
                 processedCount += batch.length
-                setLogs(prev => [...prev, `✅ Lote ${batchIndex}/${batches.length}: ${batch.length} items procesados OK.`])
+                setLogs(prev => [...prev, `✅ Lote ${batchIndex}/${batches.length}: ${batch.length} items procesados.`])
             } else {
                 errorCount += batch.length
                 setLogs(prev => [...prev, `❌ Error en Lote ${batchIndex}: ${result.error}`])
-                // Opcional: Detener proceso ante error masivo
-                // break; 
             }
         } catch (err) {
             errorCount += batch.length
             setLogs(prev => [...prev, `❌ Error crítico en Lote ${batchIndex}.`])
         }
 
-        // Actualizar progreso visual
-        processedCount = Math.min(processedCount, rows.length) // Clamp visual
+        processedCount = Math.min(processedCount, rows.length) 
         setProgress(p => ({ 
-            current: processedCount + errorCount, // Avanzamos la barra ya sea éxito o error
+            current: processedCount + errorCount,
             total: rows.length, 
             errors: errorCount 
         }))
@@ -99,10 +87,9 @@ export default function ExcelImporter() {
     }
 
     setProcessing(false)
-    setLogs(prev => [...prev, `🏁 PROCESO FINALIZADO. Éxitos: ${processedCount}, Fallos: ${errorCount}`])
+    setLogs(prev => [...prev, `🏁 FIN DEL PROCESO. Éxitos: ${processedCount} | Fallos: ${errorCount}`])
     
     if (errorCount === 0) {
-        // Limpiar filas si todo salió bien para permitir nueva carga
         setTimeout(() => {
             alert("Importación completada exitosamente.")
             setRows([])
@@ -111,27 +98,29 @@ export default function ExcelImporter() {
   }
 
   return (
-    <div className="bg-card p-6 rounded-3xl shadow-sm border border-border">
-      <h2 className="text-xl font-black text-foreground mb-4 font-nunito">Importación Masiva (Excel)</h2>
+    <div className="bg-card p-6 md:p-8 rounded-3xl shadow-sm border border-border h-full flex flex-col">
+      <h2 className="text-xl font-black text-foreground mb-4 font-nunito flex items-center gap-2">
+         <span>📊</span> Importación Masiva (Excel)
+      </h2>
       
-      <div className="mb-6 p-4 bg-primary/5 text-primary text-sm rounded-xl border border-primary/20">
-        <strong className="block mb-2 font-bold uppercase text-xs">Formato requerido (Columnas):</strong>
-        <ol className="list-decimal list-inside space-y-1 font-mono text-xs text-muted-foreground">
-            <li>Nombre Producto <span className="text-primary/50">(Ej: Collar)</span></li>
-            <li>Variante <span className="text-primary/50">(Ej: Rojo / XL)</span></li>
-            <li>Categoría <span className="text-primary/50">(Ej: Accesorios)</span></li>
-            <li>Nombre Dueño <span className="text-primary/50">(Ej: Juan Perez)</span></li>
-            <li>Costo <span className="text-primary/50">(Numérico)</span></li>
-            <li>Precio Venta <span className="text-primary/50">(Numérico)</span></li>
-        </ol>
+      <div className="mb-6 p-5 bg-primary/5 text-foreground text-sm rounded-2xl border border-primary/10">
+        <strong className="block mb-3 font-bold uppercase text-xs text-primary tracking-wide">Columnas Requeridas</strong>
+        <div className="grid grid-cols-2 gap-2 text-xs font-mono text-muted-foreground">
+            <div>1. Nombre Producto</div>
+            <div>2. Variante (Talle/Color)</div>
+            <div>3. Categoría</div>
+            <div>4. Dueño</div>
+            <div>5. Costo</div>
+            <div>6. Precio Venta</div>
+        </div>
       </div>
 
       {!processing && rows.length === 0 && (
-        <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-border rounded-2xl cursor-pointer hover:bg-muted/50 transition">
+        <label className="flex flex-col items-center justify-center w-full flex-1 min-h-[200px] border-2 border-dashed border-border rounded-2xl cursor-pointer hover:bg-muted/30 transition group">
             <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                <span className="text-2xl mb-2">📂</span>
-                <p className="mb-2 text-sm text-muted-foreground font-bold">Clic para subir archivo Excel</p>
-                <p className="text-xs text-muted-foreground">.xlsx (Max 5MB)</p>
+                <span className="text-4xl mb-3 grayscale opacity-50 group-hover:scale-110 transition-transform">📄</span>
+                <p className="mb-1 text-sm font-bold text-foreground">Subir archivo Excel</p>
+                <p className="text-xs text-muted-foreground">Click o arrastrar aquí (.xlsx)</p>
             </div>
             <input 
                 type="file" 
@@ -144,51 +133,66 @@ export default function ExcelImporter() {
 
       {rows.length > 0 && !processing && progress.current === 0 && (
         <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2">
-          <div className="flex justify-between items-center bg-muted/30 p-3 rounded-xl border border-border">
-             <p className="font-bold text-sm text-foreground">📄 {rows.length} filas detectadas.</p>
+          <div className="flex justify-between items-center bg-muted/30 p-4 rounded-2xl border border-border">
+             <div className="flex items-center gap-3">
+                 <span className="text-2xl">📑</span>
+                 <div>
+                    <p className="font-bold text-sm text-foreground">{rows.length} filas listas</p>
+                    <p className="text-xs text-muted-foreground">Preparado para importar</p>
+                 </div>
+             </div>
              <button 
                onClick={() => { setRows([]); setLogs([]); }} 
-               className="text-destructive text-xs font-bold hover:underline"
+               className="text-muted-foreground hover:text-destructive text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-destructive/10 transition"
              >
                Cancelar
              </button>
           </div>
           <button 
             onClick={startImport}
-            className="w-full bg-green-600 hover:bg-green-700 text-white py-3 rounded-xl font-black shadow-lg transition active:scale-95 flex items-center justify-center gap-2"
+            className="w-full bg-green-600 hover:bg-green-700 text-white py-4 rounded-xl font-black shadow-lg shadow-green-900/20 transition active:scale-95 flex items-center justify-center gap-2 text-sm uppercase tracking-wide"
           >
-            <span>🚀</span> INICIAR IMPORTACIÓN
+            <span>🚀</span> Comenzar Importación
           </button>
         </div>
       )}
 
       {/* BARRA DE PROGRESO */}
       {(processing || progress.current > 0) && (
-        <div className="mt-6 space-y-2 animate-in fade-in">
-          <div className="flex justify-between text-xs font-black uppercase text-muted-foreground">
-            <span>Progreso</span>
+        <div className="mt-6 space-y-3 animate-in fade-in">
+          <div className="flex justify-between text-[10px] font-black uppercase text-muted-foreground tracking-widest">
+            <span>Progreso del lote</span>
             <span>{Math.round((progress.current / progress.total) * 100)}%</span>
           </div>
-          <div className="w-full bg-secondary rounded-full h-3 overflow-hidden">
+          <div className="w-full bg-secondary rounded-full h-2 overflow-hidden">
             <div 
-              className={`h-full rounded-full transition-all duration-500 ease-out ${progress.errors > 0 ? 'bg-orange-500' : 'bg-primary'}`}
+              className={cn(
+                  "h-full rounded-full transition-all duration-300 ease-out",
+                  progress.errors > 0 ? 'bg-orange-500' : 'bg-primary'
+              )}
               style={{ width: `${(progress.current / progress.total) * 100}%` }}
             ></div>
           </div>
           <div className="flex justify-between text-xs font-bold">
-            <span className="text-muted-foreground">Procesados: {progress.current} / {progress.total}</span>
-            {progress.errors > 0 && <span className="text-destructive">Fallos: {progress.errors}</span>}
+            <span className="text-muted-foreground">Procesando {progress.current} de {progress.total}...</span>
+            {progress.errors > 0 && <span className="text-destructive bg-destructive/10 px-2 py-0.5 rounded">{progress.errors} errores</span>}
           </div>
         </div>
       )}
 
-      {/* LOGS DE CONSOLA */}
-      <div className="mt-6 bg-zinc-950 text-zinc-300 p-4 rounded-xl font-mono text-[10px] h-48 overflow-y-auto border border-zinc-800 shadow-inner custom-scrollbar">
+      {/* CONSOLA DE LOGS */}
+      <div className="mt-6 bg-slate-950 dark:bg-black text-slate-300 p-4 rounded-2xl font-mono text-[10px] h-48 overflow-y-auto border border-border shadow-inner custom-scrollbar">
         {logs.length === 0 ? (
-            <span className="opacity-30 italic">Esperando inicio del proceso...</span>
+            <div className="h-full flex items-center justify-center opacity-30 italic">
+                Esperando inicio del proceso...
+            </div>
         ) : (
             logs.map((log, i) => (
-                <div key={i} className={`mb-1.5 border-b border-white/5 pb-1 ${log.includes('❌') ? 'text-red-400' : 'text-green-400'}`}>
+                <div key={i} className={cn(
+                    "mb-1.5 border-b border-white/5 pb-1 last:border-0",
+                    log.includes('❌') ? 'text-red-400 font-bold' : 'text-green-400'
+                )}>
+                    <span className="opacity-50 mr-2">[{new Date().toLocaleTimeString()}]</span>
                     {log}
                 </div>
             ))

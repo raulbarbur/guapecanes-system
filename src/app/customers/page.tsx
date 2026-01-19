@@ -1,8 +1,9 @@
-// src/app/customers/page.tsx
 import { prisma } from "@/lib/prisma"
 import CustomerForm from "@/components/CustomerForm"
 import SearchInput from "@/components/SearchInput"
 import Link from "next/link"
+import { PageHeader } from "@/components/ui/shared/PageHeader"
+import { AppCard } from "@/components/ui/shared/AppCard"
 import { cn } from "@/lib/utils"
 
 interface Props {
@@ -13,7 +14,6 @@ export default async function CustomersPage({ searchParams }: Props) {
   const params = await searchParams
   const query = params?.query || ""
 
-  // 1. OBTENER CLIENTES Y SU DEUDA PENDIENTE
   const customers = await prisma.customer.findMany({
     where: query ? {
         OR: [
@@ -25,8 +25,8 @@ export default async function CustomersPage({ searchParams }: Props) {
     include: {
       sales: {
         where: { 
-            status: 'COMPLETED',       // Venta válida
-            paymentStatus: 'PENDING'   // Que no se haya pagado
+            status: 'COMPLETED',
+            paymentStatus: 'PENDING'
         },
         select: { total: true }
       }
@@ -34,7 +34,6 @@ export default async function CustomersPage({ searchParams }: Props) {
     orderBy: { name: 'asc' }
   })
 
-  // 2. CALCULAR SALDOS EN MEMORIA
   const customersWithDebt = customers.map(c => {
     const debt = c.sales.reduce((sum, sale) => sum + Number(sale.total), 0)
     return { ...c, currentDebt: debt }
@@ -44,81 +43,88 @@ export default async function CustomersPage({ searchParams }: Props) {
   customersWithDebt.sort((a, b) => b.currentDebt - a.currentDebt)
 
   return (
-    <div className="p-6 md:p-8 max-w-6xl mx-auto space-y-8 animate-in fade-in">
+    <div className="p-4 md:p-8 max-w-[1600px] mx-auto space-y-6 md:space-y-8 animate-in fade-in">
       
       {/* HEADER */}
-      <div>
-        <h1 className="text-3xl font-black text-foreground font-nunito tracking-tight">Clientes y Ctas. Corrientes</h1>
-        <p className="text-sm text-muted-foreground mt-1">Gestión de compradores y deudas por fiado.</p>
-      </div>
+      <PageHeader 
+        title="Cartera de Clientes"
+        description="Gestión de cuentas corrientes y perfiles de contacto."
+      />
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 md:gap-8">
         
         {/* COLUMNA IZQUIERDA: ALTA RÁPIDA */}
-        <div className="lg:col-span-1">
+        <div className="xl:col-span-1 order-2 xl:order-1">
+            {/* Si CustomerForm tiene padding interno, lo envolvemos en Card si no lo tiene. 
+                Asumo que se mantiene igual que en Owners */}
             <CustomerForm />
         </div>
 
         {/* COLUMNA DERECHA: LISTADO */}
-        <div className="lg:col-span-2 space-y-6">
-            <SearchInput placeholder="Buscar por nombre, tel o email..." />
+        <div className="xl:col-span-2 space-y-4 md:space-y-6 order-1 xl:order-2">
+            <SearchInput placeholder="🔍 Buscar cliente..." />
 
-            <div className="grid gap-4">
+            <div className="grid gap-3">
                 {customersWithDebt.map((customer) => (
-                <div key={customer.id} className="group bg-card border border-border p-4 rounded-2xl hover:border-primary/50 hover:shadow-md transition-all duration-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                    
-                    {/* INFO */}
-                    <Link href={`/customers/${customer.id}`} className="flex-1 cursor-pointer w-full">
-                        <div className="flex items-center gap-4">
-                            <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold text-sm">
-                                {customer.name.slice(0,2).toUpperCase()}
-                            </div>
-                            
-                            <div>
-                                <p className="font-bold text-lg text-foreground group-hover:text-primary transition">
-                                    {customer.name}
-                                </p>
-                                <div className="flex flex-col sm:flex-row gap-1 sm:gap-4 text-xs text-muted-foreground mt-0.5 font-medium">
-                                    {customer.phone && <span>📞 {customer.phone}</span>}
-                                    {customer.email && <span>📧 {customer.email}</span>}
+                    <Link key={customer.id} href={`/customers/${customer.id}`}>
+                        <AppCard 
+                            hoverEffect 
+                            noPadding 
+                            className="p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 rounded-2xl"
+                        >
+                            {/* INFO */}
+                            <div className="flex items-center gap-4 w-full sm:w-auto overflow-hidden">
+                                <div className="w-12 h-12 rounded-full bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/10 flex items-center justify-center text-primary font-black text-sm shrink-0">
+                                    {customer.name.slice(0,2).toUpperCase()}
+                                </div>
+                                
+                                <div className="min-w-0 flex-1">
+                                    <p className="font-bold text-lg text-foreground truncate">
+                                        {customer.name}
+                                    </p>
+                                    <div className="flex flex-col sm:flex-row gap-0.5 sm:gap-3 text-xs text-muted-foreground font-medium truncate">
+                                        {customer.phone && <span className="flex items-center gap-1">📞 {customer.phone}</span>}
+                                        {customer.email && <span className="flex items-center gap-1">📧 {customer.email}</span>}
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                    </Link>
-                    
-                    {/* ESTADO DE CUENTA */}
-                    <div className="flex items-center gap-4 w-full sm:w-auto justify-between sm:justify-end">
-                        
-                        {/* Badge Deuda */}
-                        {customer.currentDebt > 0 ? (
-                            <div className="text-right">
-                                <p className="text-[10px] font-bold text-destructive uppercase tracking-wide">Deuda</p>
-                                <p className="text-lg font-black text-destructive leading-none">
-                                    ${customer.currentDebt.toLocaleString()}
-                                </p>
-                            </div>
-                        ) : (
-                            <span className="text-xs font-bold text-green-600 dark:text-green-400 bg-green-500/10 px-3 py-1 rounded-full border border-green-500/20">
-                                Al Día
-                            </span>
-                        )}
+                            
+                            {/* ESTADO DE CUENTA */}
+                            <div className="flex items-center justify-between sm:justify-end gap-4 w-full sm:w-auto border-t sm:border-t-0 border-dashed border-border pt-3 sm:pt-0 mt-2 sm:mt-0">
+                                
+                                {/* Badge Deuda */}
+                                {customer.currentDebt > 0 ? (
+                                    <div className="text-left sm:text-right">
+                                        <p className="text-[9px] font-black text-destructive uppercase tracking-wide opacity-80">Deuda Pendiente</p>
+                                        <p className="text-xl font-black text-destructive leading-none">
+                                            ${customer.currentDebt.toLocaleString()}
+                                        </p>
+                                    </div>
+                                ) : (
+                                    <div className="bg-green-500/10 text-green-700 dark:text-green-400 px-3 py-1.5 rounded-lg border border-green-500/20 flex items-center gap-2">
+                                        <span className="text-xs font-black">AL DÍA</span>
+                                        <span className="text-xs">✨</span>
+                                    </div>
+                                )}
 
-                        {/* Botón */}
-                        <Link 
-                            href={`/customers/${customer.id}`}
-                            className="bg-secondary hover:bg-accent text-foreground px-4 py-2 rounded-xl text-xs font-bold border border-border transition"
-                        >
-                            Ver Cuenta
-                        </Link>
-                    </div>
-                </div>
+                                {/* Botón "Fake" (Toda la card es link) */}
+                                <div className="hidden sm:block">
+                                    <span className="text-xs font-bold text-muted-foreground bg-secondary px-3 py-1.5 rounded-lg border border-border">
+                                        Ver Cuenta →
+                                    </span>
+                                </div>
+                            </div>
+                        </AppCard>
+                    </Link>
                 ))}
                 
                 {customers.length === 0 && (
-                <div className="p-12 text-center text-muted-foreground border-2 border-dashed border-border rounded-3xl bg-muted/20">
-                    <span className="text-4xl block mb-2 opacity-50">👥</span>
-                    {query ? "No se encontraron clientes." : "Aún no hay clientes registrados."}
-                </div>
+                     <div className="p-12 text-center text-muted-foreground border-2 border-dashed border-border rounded-3xl bg-muted/10 animate-in fade-in">
+                        <span className="text-4xl block mb-2 opacity-50">👥</span>
+                        <p className="font-medium">
+                            {query ? "No se encontraron clientes." : "Base de datos de clientes vacía."}
+                        </p>
+                    </div>
                 )}
             </div>
         </div>
