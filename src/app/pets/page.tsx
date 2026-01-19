@@ -24,11 +24,17 @@ export default async function PetsPage({ searchParams }: Props) {
     orderBy: { name: 'asc' }
   })
 
-  // Action inline wrapper
+  // Action inline wrapper para DELETE
   async function handleDelete(formData: FormData) {
     'use server'
     const id = formData.get("id") as string
     await deletePet(id)
+  }
+
+  // Wrapper action para CREATE, soluciona el error de build
+  async function createPetAction(formData: FormData) {
+    // No necesita 'use server' porque la acción importada ya lo tiene
+    await createPet(formData)
   }
 
   const inputClass = "w-full p-3 rounded-xl border border-input bg-background text-foreground text-sm focus:ring-2 focus:ring-primary outline-none transition"
@@ -49,7 +55,8 @@ export default async function PetsPage({ searchParams }: Props) {
         <div className="lg:col-span-1">
           <div className="bg-card p-6 rounded-3xl shadow-sm border border-border sticky top-6">
             <h2 className="text-xl font-black text-foreground mb-6 font-nunito">🐕 Nueva Ficha</h2>
-            <form action={createPet} className="space-y-4">
+            {/* 👇 CAMBIO REALIZADO AQUÍ 👇 */}
+            <form action={createPetAction} className="space-y-4">
               <div>
                 <label className={labelClass}>Nombre Mascota *</label>
                 <input name="name" type="text" required placeholder="Ej: Bobby" className={inputClass}/>
