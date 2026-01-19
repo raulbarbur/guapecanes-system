@@ -1,8 +1,8 @@
-// src/app/owners/[id]/page.tsx
 import { prisma } from "@/lib/prisma"
 import Link from "next/link"
 import { notFound } from "next/navigation"
 import { cn } from "@/lib/utils"
+import { InfoCard } from "@/components/ui/InfoCard" // << IMPORTAR
 
 interface Props {
   params: Promise<{ id: string }>
@@ -23,7 +23,7 @@ export default async function OwnerProfilePage({ params }: Props) {
                         where: { 
                             sale: { 
                                 status: 'COMPLETED',
-                                paymentStatus: 'PAID' // 👈 FILTRO
+                                paymentStatus: 'PAID' 
                             } 
                         }
                     }
@@ -68,69 +68,72 @@ export default async function OwnerProfilePage({ params }: Props) {
   const totalDebt = debtFromSales + debtFromAdj
 
   return (
-    <div className="p-6 md:p-8 max-w-6xl mx-auto space-y-8 animate-in fade-in">
+    <div className="p-4 md:p-8 max-w-6xl mx-auto space-y-6 md:space-y-8 animate-in fade-in">
       
       {/* HEADER */}
-      <div className="flex flex-col md:flex-row justify-between items-start gap-6">
-        <div>
-            <Link href="/owners" className="text-xs font-bold text-primary hover:underline mb-2 block">← Volver al listado</Link>
-            <h1 className="text-4xl font-black text-foreground flex items-center gap-3 font-nunito">
-                {owner.name}
-                {!owner.isActive && <span className="text-xs bg-destructive/10 text-destructive px-2 py-1 rounded border border-destructive/20">INACTIVO</span>}
-            </h1>
-            <div className="mt-2 text-muted-foreground flex flex-col gap-1 text-sm">
-                <p>📧 {owner.email || "Sin email"}</p>
-                <p>📞 {owner.phone || "Sin teléfono"}</p>
+      <div className="flex flex-col gap-6">
+        <div className="flex flex-col md:flex-row justify-between items-start gap-4">
+            <div>
+                <Link href="/owners" className="text-xs font-bold text-primary hover:underline mb-2 block">← Volver al listado</Link>
+                <div className="flex items-center gap-3">
+                    <h1 className="text-3xl md:text-4xl font-black text-foreground font-nunito">{owner.name}</h1>
+                    {!owner.isActive && <span className="text-xs bg-destructive/10 text-destructive px-2 py-1 rounded border border-destructive/20 font-bold">INACTIVO</span>}
+                    <Link 
+                        href={`/owners/${owner.id}/edit`}
+                        className="text-xs font-bold bg-card text-muted-foreground px-2 py-1 rounded border hover:text-foreground transition"
+                    >
+                        ✏️
+                    </Link>
+                </div>
             </div>
-            <div className="mt-4">
-                <Link 
-                    href={`/owners/${owner.id}/edit`}
-                    className="text-xs font-bold bg-card text-foreground px-3 py-1.5 rounded-lg border border-border hover:bg-accent transition"
-                >
-                    ✏️ EDITAR DATOS
-                </Link>
+
+            {/* KPI DE DEUDA */}
+            <div className={cn(
+                "p-4 rounded-2xl shadow-md border min-w-[280px] flex items-center justify-between gap-4 w-full md:w-auto",
+                totalDebt > 0 
+                    ? 'bg-slate-900 dark:bg-card text-white dark:text-foreground border-slate-800' 
+                    : 'bg-green-600 dark:bg-green-900/20 text-white dark:text-green-400 border-green-500'
+            )}>
+                <div>
+                    <p className="text-[10px] font-bold uppercase opacity-70">Saldo Pendiente</p>
+                    <p className="text-3xl font-black tracking-tight">${totalDebt.toLocaleString()}</p>
+                </div>
+                
+                {totalDebt !== 0 ? (
+                    <Link 
+                        href={`/owners/settlement/${owner.id}`}
+                        className="bg-white text-slate-900 px-4 py-2 rounded-lg font-bold text-xs shadow hover:scale-105 transition"
+                    >
+                        {totalDebt > 0 ? "PAGAR" : "AJUSTAR"}
+                    </Link>
+                ) : (
+                    <span className="text-2xl">✅</span>
+                )}
             </div>
         </div>
-
-        {/* CAJA DE ESTADO DE CUENTA (KPI) */}
-        <div className={cn(
-            "p-6 rounded-3xl shadow-lg border min-w-[300px] flex flex-col justify-between",
-            totalDebt > 0 
-                ? 'bg-slate-900 dark:bg-card text-white dark:text-foreground border-slate-800 dark:border-border' 
-                : 'bg-green-600 dark:bg-green-900/20 text-white dark:text-green-400 border-green-500 dark:border-green-900/50'
-        )}>
-            <div>
-                <p className="text-xs font-bold uppercase opacity-70 mb-1">Saldo Pendiente</p>
-                <p className="text-4xl font-black mb-4 tracking-tight">${totalDebt.toLocaleString()}</p>
-            </div>
-            
-            {totalDebt !== 0 ? (
-                <Link 
-                    href={`/owners/settlement/${owner.id}`}
-                    className="block text-center bg-white text-slate-900 dark:bg-primary dark:text-primary-foreground font-bold py-3 rounded-xl shadow hover:scale-[1.02] transition active:scale-95 text-sm"
-                >
-                    {totalDebt > 0 ? "💸 LIQUIDAR (PAGAR)" : "⚖️ AJUSTAR SALDO"}
-                </Link>
-            ) : (
-                <div className="flex items-center gap-2 text-sm font-bold bg-white/20 p-2 rounded-lg">
-                    <span>✅</span> Todo al día
-                </div>
-            )}
+        
+        {/* GRILLA CONTACTO */}
+        <div className="flex flex-wrap gap-3">
+            <InfoCard icon="📧" label="Email" value={owner.email} />
+            <InfoCard icon="📞" label="Teléfono" value={owner.phone} />
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         
-        {/* COLUMNA IZQUIERDA: INVENTARIO ACTUAL */}
-        <div className="bg-card rounded-3xl shadow-sm border border-border overflow-hidden">
-            <div className="p-5 border-b border-border bg-muted/30 flex justify-between items-center">
+        {/* INVENTARIO */}
+        <div className="bg-card rounded-3xl shadow-sm border border-border overflow-hidden flex flex-col h-[500px]">
+            <div className="p-5 border-b border-border bg-muted/30 flex justify-between items-center shrink-0">
                 <h2 className="font-bold text-foreground">📦 En Stock ({activeInventory.length})</h2>
-                <span className="text-xs text-muted-foreground">Mercadería en el local</span>
+                <span className="text-xs text-muted-foreground">Mercadería activa</span>
             </div>
             
-            <div className="max-h-[400px] overflow-y-auto divide-y divide-border custom-scrollbar">
+            <div className="overflow-y-auto divide-y divide-border custom-scrollbar flex-1">
                 {activeInventory.length === 0 ? (
-                    <div className="p-10 text-center text-muted-foreground opacity-60">Este dueño no tiene productos activos.</div>
+                    <div className="h-full flex flex-col items-center justify-center text-muted-foreground opacity-60">
+                        <span className="text-4xl mb-2 grayscale">📦</span>
+                        <p>Sin stock activo</p>
+                    </div>
                 ) : (
                     activeInventory.map((item, idx) => (
                         <div key={idx} className="p-4 flex justify-between items-center hover:bg-muted/30 transition">
@@ -155,15 +158,18 @@ export default async function OwnerProfilePage({ params }: Props) {
             </div>
         </div>
 
-        {/* COLUMNA DERECHA: HISTORIAL DE PAGOS */}
-        <div className="bg-card rounded-3xl shadow-sm border border-border overflow-hidden">
-            <div className="p-5 border-b border-border bg-muted/30">
-                <h2 className="font-bold text-foreground">📜 Historial de Pagos</h2>
+        {/* HISTORIAL PAGOS */}
+        <div className="bg-card rounded-3xl shadow-sm border border-border overflow-hidden flex flex-col h-[500px]">
+            <div className="p-5 border-b border-border bg-muted/30 shrink-0">
+                <h2 className="font-bold text-foreground">📜 Últimos Pagos</h2>
             </div>
             
-            <div className="max-h-[400px] overflow-y-auto divide-y divide-border custom-scrollbar">
+            <div className="overflow-y-auto divide-y divide-border custom-scrollbar flex-1">
                 {owner.settlements.length === 0 ? (
-                    <div className="p-10 text-center text-muted-foreground opacity-60">Nunca se le ha pagado.</div>
+                    <div className="h-full flex flex-col items-center justify-center text-muted-foreground opacity-60">
+                        <span className="text-4xl mb-2 grayscale">💸</span>
+                        <p>Sin pagos registrados</p>
+                    </div>
                 ) : (
                     owner.settlements.map(settlement => (
                         <div key={settlement.id} className="p-4 flex justify-between items-center hover:bg-muted/30 transition group">

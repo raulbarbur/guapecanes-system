@@ -5,6 +5,8 @@ import { createCustomer, updateCustomer } from "@/actions/customer-actions"
 import { useRouter } from "next/navigation"
 import { useState } from "react"
 import { cn } from "@/lib/utils"
+import { useToast } from "@/components/ui/Toast"
+import { CollapsibleSection } from "@/components/ui/CollapsibleSection"
 
 type CustomerData = {
   id?: string
@@ -17,6 +19,7 @@ type CustomerData = {
 export default function CustomerForm({ initialData }: { initialData?: CustomerData }) {
   const [loading, setLoading] = useState(false)
   const router = useRouter()
+  const { addToast } = useToast()
 
   const handleSubmit = async (formData: FormData) => {
     setLoading(true)
@@ -24,17 +27,16 @@ export default function CustomerForm({ initialData }: { initialData?: CustomerDa
     let result;
     
     if (initialData?.id) {
-        // MODO EDICIÓN
         formData.append("id", initialData.id)
         result = await updateCustomer(formData)
         if (result.success) {
+            addToast("Cliente actualizado", "success")
             router.refresh()
-            // Opcional: Podríamos redirigir, pero si estamos en el perfil, el refresh basta
         }
     } else {
-        // MODO CREACIÓN
         result = await createCustomer(formData)
         if (result?.success) {
+            addToast("Cliente creado", "success")
             const form = document.getElementById("customer-form") as HTMLFormElement
             form?.reset()
             router.refresh()
@@ -42,10 +44,9 @@ export default function CustomerForm({ initialData }: { initialData?: CustomerDa
     }
 
     setLoading(false)
-    if (result?.error) alert(result.error)
+    if (result?.error) addToast(result.error, "error")
   }
 
-  // Estilos compartidos
   const inputClass = "w-full p-3 rounded-xl border border-input bg-background text-foreground text-sm focus:ring-2 focus:ring-primary outline-none transition"
   const labelClass = "block text-xs font-bold text-muted-foreground uppercase mb-1.5"
 
@@ -57,7 +58,6 @@ export default function CustomerForm({ initialData }: { initialData?: CustomerDa
       
       <form id="customer-form" action={handleSubmit} className="flex flex-col gap-5">
         
-        {/* NOMBRE */}
         <div>
           <label className={labelClass}>Nombre y Apellido *</label>
           <input 
@@ -65,12 +65,12 @@ export default function CustomerForm({ initialData }: { initialData?: CustomerDa
             defaultValue={initialData?.name}
             type="text" 
             required 
+            autoFocus
             className={inputClass} 
             placeholder="Ej: Laura Gómez"
           />
         </div>
 
-        {/* TELÉFONO */}
         <div>
           <label className={labelClass}>Teléfono / WhatsApp</label>
           <input 
@@ -82,29 +82,31 @@ export default function CustomerForm({ initialData }: { initialData?: CustomerDa
           />
         </div>
 
-        {/* EMAIL */}
-        <div>
-          <label className={labelClass}>Email (Opcional)</label>
-          <input 
-            name="email" 
-            defaultValue={initialData?.email || ""}
-            type="email" 
-            className={inputClass} 
-            placeholder="cliente@mail.com"
-          />
-        </div>
+        <CollapsibleSection title="Más Datos de Contacto" icon="📍">
+            <div className="space-y-4 pt-2">
+                <div>
+                  <label className={labelClass}>Email (Opcional)</label>
+                  <input 
+                    name="email" 
+                    defaultValue={initialData?.email || ""}
+                    type="email" 
+                    className={inputClass} 
+                    placeholder="cliente@mail.com"
+                  />
+                </div>
 
-        {/* DIRECCIÓN */}
-        <div>
-          <label className={labelClass}>Dirección (Opcional)</label>
-          <input 
-            name="address" 
-            defaultValue={initialData?.address || ""}
-            type="text" 
-            className={inputClass} 
-            placeholder="Av. Principal 123"
-          />
-        </div>
+                <div>
+                  <label className={labelClass}>Dirección (Opcional)</label>
+                  <input 
+                    name="address" 
+                    defaultValue={initialData?.address || ""}
+                    type="text" 
+                    className={inputClass} 
+                    placeholder="Av. Principal 123"
+                  />
+                </div>
+            </div>
+        </CollapsibleSection>
 
         <button 
           type="submit" 

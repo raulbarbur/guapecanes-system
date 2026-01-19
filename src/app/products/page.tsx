@@ -1,3 +1,5 @@
+//export const dynamic = 'force-dynamic'
+
 import { prisma } from "@/lib/prisma"
 import ProductForm from "@/components/ProductForm"
 import ProductActions from "@/components/ProductActions"

@@ -1,4 +1,6 @@
 // src/app/products/[id]/page.tsx
+export const dynamic = 'force-dynamic'
+
 import { prisma } from "@/lib/prisma"
 import { translateMovementType } from "@/services/inventory-service"
 import Link from "next/link"

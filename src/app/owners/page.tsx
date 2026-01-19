@@ -1,3 +1,5 @@
+//export const dynamic = 'force-dynamic'
+
 import { prisma } from "@/lib/prisma"
 import OwnerForm from "@/components/OwnerForm" 
 import SearchInput from "@/components/SearchInput" 

@@ -30,6 +30,12 @@ export default function AppointmentCard({ appt }: { appt: AppointmentData }) {
     setLoading(false)
   }
 
+  // Wrapper action para la cancelación del turno
+  async function handleCancelAppointment(formData: FormData) {
+    // No necesita 'use server', la acción importada ya lo tiene
+    await cancelAppointment(formData)
+  }
+
   // DEFINICIÓN DE ESTILOS POR ESTADO
   // Usamos border-l-4 para mantener la identidad visual, pero con colores compatibles
   const statusStyles: Record<string, string> = {
@@ -121,7 +127,8 @@ export default function AppointmentCard({ appt }: { appt: AppointmentData }) {
 
             {/* 4. CANCELAR */}
             {(appt.status === 'PENDING' || appt.status === 'CONFIRMED') && (
-                <form action={cancelAppointment}>
+                /* 👇 CAMBIO REALIZADO AQUÍ 👇 */
+                <form action={handleCancelAppointment}>
                     <input type="hidden" name="id" value={appt.id} />
                     <button className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 p-2 rounded-lg transition">
                         ✖
